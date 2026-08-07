@@ -160,15 +160,9 @@ class ViewerController {
     try {
       this.manifest = await loadManifest("./manifest.json");
       const imageCount = this.manifest.frameCount * 2;
-      const preloadInput = this.manifest.frames.map((frame) => ({
-        index: frame.index,
-        time_ms: frame.timeMs,
-        colorUrl: frame.color.url,
-        depthUrl: frame.depth.url,
-      }));
       this.updateLoading({ percent: 0, label: `이미지 0 / ${imageCount} 불러오는 중` });
 
-      this.frames = await preloadFrames(preloadInput, {
+      this.frames = await preloadFrames(this.manifest.frames, {
         onProgress: ({ completed, total, percent }) => {
           this.updateLoading({ percent, label: `이미지 ${completed} / ${total} 불러오는 중` });
         },
@@ -246,15 +240,15 @@ class ViewerController {
         throw new Error(`프레임 ${index}을 찾을 수 없습니다.`);
       }
 
-      this.prepareColorFrame(index, frame.colorImage);
-      this.prepareDepthFrame(index, frame.depthImage);
+      this.prepareColorFrame(index, frame.color.image);
+      this.prepareDepthFrame(index, frame.depth.image);
       isCommitting = true;
       this.commitFrame(index);
       isCommitting = false;
       this.elements["frame-slider"].value = String(index);
       this.elements["frame-readout"].value = `${frame.index} / ${this.frames.length - 1}`;
       this.elements["frame-readout"].textContent = `${frame.index} / ${this.frames.length - 1}`;
-      const elapsed = formatElapsed(frame.time_ms);
+      const elapsed = formatElapsed(frame.timeMs);
       this.elements["time-readout"].value = elapsed;
       this.elements["time-readout"].textContent = elapsed;
       return true;

@@ -2,34 +2,46 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { FrameLoadError, loadImage, preloadFrames } from "../src/preload.js";
+import type { SequenceFrame } from "../src/manifest.js";
+import type { LoadableImage, PreloadProgress } from "../src/preload.js";
 
-class HangingImage {
-  static instances = [];
+class LoadedImage implements LoadableImage {
+  decoding: LoadableImage["decoding"] = "auto";
+  onload: ((event: Event) => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
+  src: string;
+
+  constructor(readonly source: string) {
+    this.src = source;
+  }
+}
+
+class HangingImage implements LoadableImage {
+  static instances: HangingImage[] = [];
+
+  decoding: LoadableImage["decoding"] = "auto";
+  onload: ((event: Event) => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
+  src = "";
+  removedSource = false;
 
   constructor() {
-    this.onload = null;
-    this.onerror = null;
-    this.removedSource = false;
     HangingImage.instances.push(this);
   }
 
-  set src(value) {
-    this.source = value;
-  }
-
-  removeAttribute(name) {
+  removeAttribute(name: string): void {
     if (name === "src") {
       this.removedSource = true;
     }
   }
 }
 
-async function withTestDeadline(promise, timeoutMs = 250) {
-  let timeoutId;
+async function withTestDeadline<T>(promise: Promise<T>, timeoutMs = 250): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       promise,
-      new Promise((resolve, reject) => {
+      new Promise<never>((_resolve, reject) => {
         timeoutId = setTimeout(
           () => reject(new Error("테스트 제한 시간 안에 이미지 요청이 끝나야 합니다.")),
           timeoutMs,
@@ -37,23 +49,39 @@ async function withTestDeadline(promise, timeoutMs = 250) {
       }),
     ]);
   } finally {
-    clearTimeout(timeoutId);
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
   }
 }
 
-function frames() {
+function frames(): SequenceFrame[] {
   return [
     {
       index: 0,
-      colorUrl: "https://example.test/color_000000.png",
-      depthUrl: "https://example.test/depth_000000.png",
-      time_ms: 0,
+      timeMs: 0,
+      color: {
+        kind: "color",
+        sourcePath: "color_000000.png",
+        url: "https://example.test/color_000000.png",
+      },
+      depth: {
+        kind: "depth",
+        sourcePath: "depth_000000.png",
+        url: "https://example.test/depth_000000.png",
+      },
     },
     {
       index: 1,
-      colorUrl: "https://example.test/color_000001.png",
-      depthUrl: "https://example.test/depth_000001.png",
-      time_ms: 100,
+      timeMs: 100,
+      color: {
+        kind: "color",
+        sourcePath: "color_000001.png",
+        url: "https://example.test/color_000001.png",
+      },
+      depth: {
+        kind: "depth",
+        sourcePath: "depth_000001.png",
+        url: "https://example.test/depth_000001.png",
+      },
     },
   ];
 }
@@ -62,21 +90,25 @@ test("모든 프레임에 불러온 컬러와 깊이 이미지를 연결한다",
   const input = frames();
 
   const result = await preloadFrames(input, {
-    imageLoader: async (url) => ({ source: url }),
+    imageLoader: async (url) => new LoadedImage(url),
   });
 
-  assert.equal(result[0].colorImage.source, "https://example.test/color_000000.png");
-  assert.equal(result[0].depthImage.source, "https://example.test/depth_000000.png");
-  assert.equal(result[1].colorImage.source, "https://example.test/color_000001.png");
-  assert.equal(input[0].colorImage, undefined);
+  assert.equal(result[0]?.color.kind, "color");
+  assert.equal(result[0]?.color.sourcePath, "color_000000.png");
+  assert.equal(result[0]?.color.image.source, "https://example.test/color_000000.png");
+  assert.equal(result[0]?.depth.kind, "depth");
+  assert.equal(result[1]?.depth.image.source, "https://example.test/depth_000001.png");
+  assert.equal("image" in input[0].color, false);
 });
 
 test("이미지 하나가 끝날 때마다 완료 수와 백분율을 알린다", async () => {
-  const progress = [];
+  const progress: PreloadProgress[] = [];
 
   await preloadFrames([frames()[0]], {
-    imageLoader: async (url) => ({ source: url }),
-    onProgress: (state) => progress.push(state),
+    imageLoader: async (url) => new LoadedImage(url),
+    onProgress: (state) => {
+      progress.push(state);
+    },
   });
 
   assert.deepEqual(progress, [
@@ -86,8 +118,8 @@ test("이미지 하나가 끝날 때마다 완료 수와 백분율을 알린다"
 });
 
 test("실패한 이미지가 있어도 모든 로딩 결과를 수집한다", async () => {
-  const attempted = [];
-  const progress = [];
+  const attempted: string[] = [];
+  const progress: number[] = [];
 
   await assert.rejects(
     preloadFrames(frames(), {
@@ -96,9 +128,11 @@ test("실패한 이미지가 있어도 모든 로딩 결과를 수집한다", as
         if (url.includes("depth")) {
           throw new Error("손상된 PNG");
         }
-        return { source: url };
+        return new LoadedImage(url);
       },
-      onProgress: (state) => progress.push(state.percent),
+      onProgress: (state) => {
+        progress.push(state.percent);
+      },
     }),
     (error) => {
       assert.ok(error instanceof FrameLoadError);
@@ -122,16 +156,20 @@ test("이미지 요청이 제한 시간을 넘으면 핸들러와 요청을 정�
   const loading = loadImage("https://example.test/hanging.png", HangingImage, { timeoutMs: 5 });
   const image = HangingImage.instances[0];
   const lateLoad = image.onload;
+  assert.ok(lateLoad);
 
   await assert.rejects(
     withTestDeadline(loading),
-    (error) => error.name === "TimeoutError" && /hanging\.png/.test(error.message),
+    (error) =>
+      error instanceof Error &&
+      error.name === "TimeoutError" &&
+      /hanging\.png/.test(error.message),
   );
 
   assert.equal(image.onload, null);
   assert.equal(image.onerror, null);
   assert.equal(image.removedSource, true);
-  lateLoad();
+  lateLoad(new Event("load"));
   assert.equal(image.onload, null);
 });
 
@@ -148,7 +186,11 @@ test("이미지 시간 초과를 프레임과 종류를 보존한 로딩 오류�
     (error) => {
       assert.ok(error instanceof FrameLoadError);
       assert.deepEqual(
-        error.failures.map(({ frameIndex, kind, cause }) => [frameIndex, kind, cause.name]),
+        error.failures.map(({ frameIndex, kind, cause }) => [
+          frameIndex,
+          kind,
+          cause instanceof Error ? cause.name : undefined,
+        ]),
         [
           [0, "color", "TimeoutError"],
           [0, "depth", "TimeoutError"],
