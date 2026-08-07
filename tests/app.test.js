@@ -43,6 +43,25 @@ test("프레임 로딩 오류에 실패 파일명을 안내한다", () => {
   assert.match(message, /2개/);
 });
 
+test("이미지 시간 초과에는 파일 경로와 서버 응답 확인을 안내한다", () => {
+  const cause = new Error("이미지 요청 시간 초과");
+  cause.name = "TimeoutError";
+  const error = new FrameLoadError([
+    {
+      frameIndex: 3,
+      kind: "depth",
+      url: "http://localhost:8000/depth_000003.png",
+      cause,
+    },
+  ]);
+
+  const message = describeViewerError(error);
+
+  assert.match(message, /시간 초과/);
+  assert.match(message, /파일명과 manifest\.json의 경로/);
+  assert.match(message, /서버 응답/);
+});
+
 test("예상하지 못한 오류에는 다시 시도할 방법을 안내한다", () => {
   const message = describeViewerError(new Error("알 수 없는 오류"));
 

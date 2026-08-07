@@ -28,6 +28,23 @@ function validManifest() {
   };
 }
 
+async function withTestDeadline(promise, timeoutMs = 250) {
+  let timeoutId;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((resolve, reject) => {
+        timeoutId = setTimeout(
+          () => reject(new Error("테스트 제한 시간 안에 요청이 끝나야 합니다.")),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 test("manifest 위치를 기준으로 프레임 URL을 해석한다", () => {
   const manifest = validManifest();
 
@@ -155,4 +172,28 @@ test("네트워크 실패 원인을 보존한다", async () => {
     }),
     (error) => error instanceof ManifestError && error.cause === cause,
   );
+});
+
+test("signal을 무시하는 manifest 요청도 제한 시간 뒤 중단한다", async () => {
+  let receivedSignal;
+  const neverSettles = new Promise(() => {});
+
+  await assert.rejects(
+    withTestDeadline(
+      loadManifest(
+        "./manifest.json",
+        async (url, options) => {
+          receivedSignal = options.signal;
+          return neverSettles;
+        },
+        { timeoutMs: 5 },
+      ),
+    ),
+    (error) =>
+      error instanceof ManifestError &&
+      error.cause?.name === "TimeoutError" &&
+      /시간 초과/.test(error.message),
+  );
+
+  assert.equal(receivedSignal.aborted, true);
 });

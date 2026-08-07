@@ -6,7 +6,13 @@ export class FrameLoadError extends Error {
   }
 }
 
-export function loadImage(url, ImageConstructor = globalThis.Image) {
+const DEFAULT_IMAGE_TIMEOUT_MS = 10_000;
+
+export function loadImage(
+  url,
+  ImageConstructor = globalThis.Image,
+  { timeoutMs = DEFAULT_IMAGE_TIMEOUT_MS } = {},
+) {
   return new Promise((resolve, reject) => {
     if (typeof ImageConstructor !== "function") {
       reject(new Error("이 환경에서는 이미지를 불러올 수 없습니다."));
@@ -15,25 +21,53 @@ export function loadImage(url, ImageConstructor = globalThis.Image) {
 
     const image = new ImageConstructor();
     image.decoding = "async";
+    let settled = false;
+    let timeoutId;
     const clearHandlers = () => {
       image.onload = null;
       image.onerror = null;
     };
-    image.onload = () => {
+    const settle = (callback, value, { cancel = false } = {}) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      clearTimeout(timeoutId);
       clearHandlers();
-      resolve(image);
+      if (cancel && typeof image.removeAttribute === "function") {
+        image.removeAttribute("src");
+      }
+      callback(value);
+    };
+    image.onload = () => {
+      settle(resolve, image);
     };
     image.onerror = () => {
-      clearHandlers();
-      reject(new Error(`이미지 요청에 실패했습니다: ${url}`));
+      settle(reject, new Error(`이미지 요청에 실패했습니다: ${url}`));
     };
-    image.src = url;
+    timeoutId = setTimeout(() => {
+      const error = new Error(`이미지 요청이 ${timeoutMs}ms 후 시간 초과되었습니다: ${url}`);
+      error.name = "TimeoutError";
+      settle(reject, error, { cancel: true });
+    }, timeoutMs);
+
+    try {
+      image.src = url;
+    } catch (cause) {
+      settle(reject, cause);
+    }
   });
 }
 
 export async function preloadFrames(
   frames,
-  { imageLoader = loadImage, onProgress = () => {} } = {},
+  {
+    imageLoader = loadImage,
+    ImageConstructor = globalThis.Image,
+    imageTimeoutMs = DEFAULT_IMAGE_TIMEOUT_MS,
+    onProgress = () => {},
+  } = {},
 ) {
   const assets = frames.flatMap((frame, framePosition) => [
     {
@@ -56,7 +90,9 @@ export async function preloadFrames(
   const settled = await Promise.all(
     assets.map(async (asset) => {
       try {
-        const image = await imageLoader(asset.url);
+        const image = await imageLoader(asset.url, ImageConstructor, {
+          timeoutMs: imageTimeoutMs,
+        });
         return { ...asset, image };
       } catch (cause) {
         return { ...asset, cause };

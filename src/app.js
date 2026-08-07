@@ -53,7 +53,10 @@ export function describeViewerError(error) {
     const names = error.failures.slice(0, 5).map((failure) => fileNameFromUrl(failure.url));
     const remaining = error.failures.length - names.length;
     const remainingText = remaining > 0 ? `, 그 외 ${remaining}개` : "";
-    return `프레임 이미지 ${error.failures.length}개를 불러오지 못했습니다. 실패 파일: ${names.join(", ")}${remainingText}. 파일명과 manifest.json의 경로를 확인하세요.`;
+    const timeoutText = error.failures.some((failure) => failure.cause?.name === "TimeoutError")
+      ? " 시간 초과가 계속되면 로컬 HTTP 서버 응답 상태를 확인하세요."
+      : "";
+    return `프레임 이미지 ${error.failures.length}개를 불러오지 못했습니다. 실패 파일: ${names.join(", ")}${remainingText}. 파일명과 manifest.json의 경로를 확인하세요.${timeoutText}`;
   }
 
   return "뷰어를 실행하는 중 오류가 발생했습니다. 페이지를 새로고침하고 더미 데이터를 다시 생성해 보세요.";

@@ -5,6 +5,8 @@ export class ManifestError extends Error {
   }
 }
 
+const DEFAULT_MANIFEST_TIMEOUT_MS = 10_000;
+
 function requireRecord(value, field) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new ManifestError(`${field}은 객체여야 합니다.`);
@@ -102,16 +104,44 @@ export function validateManifest(value, manifestUrl) {
   };
 }
 
-export async function loadManifest(url = "./manifest.json", fetchImpl = globalThis.fetch) {
+export async function loadManifest(
+  url = "./manifest.json",
+  fetchImpl = globalThis.fetch,
+  { timeoutMs = DEFAULT_MANIFEST_TIMEOUT_MS } = {},
+) {
   let response;
+  const controller = new AbortController();
+  let timeoutId;
+  const timeout = new Promise((resolve, reject) => {
+    timeoutId = setTimeout(() => {
+      const cause = new Error(`manifest 요청이 ${timeoutMs}ms 안에 끝나지 않았습니다.`);
+      cause.name = "TimeoutError";
+      reject(cause);
+      controller.abort(cause);
+    }, timeoutMs);
+  });
 
   try {
-    response = await fetchImpl(url, { cache: "no-store" });
+    response = await Promise.race([
+      Promise.resolve().then(() =>
+        fetchImpl(url, { cache: "no-store", signal: controller.signal }),
+      ),
+      timeout,
+    ]);
   } catch (cause) {
+    if (cause?.name === "TimeoutError") {
+      throw new ManifestError(
+        `manifest.json 요청이 ${timeoutMs}ms 후 시간 초과되었습니다. 파일 경로와 로컬 HTTP 서버 응답 상태를 확인하세요.`,
+        { cause },
+      );
+    }
+
     throw new ManifestError(
       "manifest.json을 가져오지 못했습니다. 로컬 HTTP 서버와 파일 위치를 확인하세요.",
       { cause },
     );
+  } finally {
+    clearTimeout(timeoutId);
   }
 
   if (!response?.ok) {
