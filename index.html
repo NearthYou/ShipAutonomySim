@@ -41,7 +41,7 @@
             <span class="readout-label">경과 시간</span>
             <output id="time-readout">00:00.000</output>
           </div>
-          <div class="viewer-state" id="viewer-state">로딩 전</div>
+          <div class="viewer-state" id="viewer-state" role="status" aria-live="polite">로딩 전</div>
         </section>
 
         <section class="canvas-grid" aria-label="컬러와 깊이 프레임 비교">
@@ -55,7 +55,7 @@
             </header>
             <div class="canvas-stage">
               <canvas id="color-canvas" width="640" height="360" aria-label="현재 컬러 프레임"></canvas>
-              <span class="canvas-placeholder">COLOR</span>
+              <span class="canvas-placeholder" aria-hidden="true">COLOR</span>
             </div>
           </article>
 
@@ -69,7 +69,7 @@
             </header>
             <div class="canvas-stage">
               <canvas id="depth-canvas" width="640" height="360" aria-label="현재 깊이 프레임"></canvas>
-              <span class="canvas-placeholder">DEPTH</span>
+              <span class="canvas-placeholder" aria-hidden="true">DEPTH</span>
             </div>
           </article>
         </section>
