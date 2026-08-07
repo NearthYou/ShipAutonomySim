@@ -30,6 +30,7 @@ const FRAME_KIND_LABELS = {
   color: "컬러",
   depth: "깊이",
 };
+const MAX_CAUSE_DESCRIPTION_LENGTH = 200;
 
 export class FrameRenderError extends Error {
   constructor(frameIndex, kind, cause) {
@@ -58,6 +59,25 @@ function fileNameFromUrl(url) {
   }
 }
 
+function normalizeCauseDescription(cause) {
+  let description = "";
+  try {
+    if (typeof cause === "string") {
+      description = cause;
+    } else if (typeof cause?.message === "string") {
+      description = cause.message;
+    }
+  } catch {
+    return "알 수 없는 오류";
+  }
+
+  const normalized = description
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized.slice(0, MAX_CAUSE_DESCRIPTION_LENGTH) || "알 수 없는 오류";
+}
+
 export function describeViewerError(error) {
   if (error instanceof ManifestError) {
     return `${error.message} manifest.json의 내용과 로컬 서버 실행 상태를 확인하세요.`;
@@ -75,7 +95,8 @@ export function describeViewerError(error) {
 
   if (error instanceof FrameRenderError) {
     const kindLabel = FRAME_KIND_LABELS[error.kind];
-    return `프레임 ${error.frameIndex}의 ${kindLabel} 데이터를 렌더링하지 못했습니다. 해당 ${kindLabel} 이미지 파일을 확인하거나 다시 생성하세요.`;
+    const causeDescription = normalizeCauseDescription(error.cause);
+    return `프레임 ${error.frameIndex}의 ${kindLabel} 데이터를 렌더링하지 못했습니다. 해당 ${kindLabel} 이미지 파일을 확인하거나 다시 생성하세요. 원인: ${causeDescription}.`;
   }
 
   return "뷰어를 실행하는 중 오류가 발생했습니다. 페이지를 새로고침하고 더미 데이터를 다시 생성해 보세요.";

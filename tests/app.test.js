@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { describeViewerError, formatElapsed, startViewer } from "../src/app.js";
+import {
+  describeViewerError,
+  formatElapsed,
+  FrameRenderError,
+  startViewer,
+} from "../src/app.js";
 import { ManifestError } from "../src/manifest.js";
 import { FrameLoadError } from "../src/preload.js";
 
@@ -269,6 +274,15 @@ test("캔버스 오류에 프레임과 데이터 종류 및 원인을 보존한�
   assert.match(message, /프레임 1/);
   assert.match(message, /깊이/);
   assert.match(message, /확인하거나 다시 생성/);
+});
+
+test("캔버스 오류 안내에 정규화한 실제 원인을 포함한다", () => {
+  const cause = new Error("  SecurityError:\n깊이 캔버스\t읽기 실패  ");
+
+  const message = describeViewerError(new FrameRenderError(4, "depth", cause));
+
+  assert.match(message, /원인: SecurityError: 깊이 캔버스 읽기 실패/);
+  assert.doesNotMatch(message, /[\n\t]/);
 });
 
 test("예상하지 못한 오류에는 다시 시도할 방법을 안내한다", () => {
