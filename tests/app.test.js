@@ -90,6 +90,7 @@ class FakeCanvas extends FakeElement {
 
 function createFakeRoot() {
   const root = {
+    createdCanvases: [],
     depthReadError: new Error("깊이 픽셀 읽기 실패"),
     failDepthRead: false,
   };
@@ -114,7 +115,9 @@ function createFakeRoot() {
       if (tagName !== "canvas") {
         throw new Error(`지원하지 않는 테스트 요소입니다: ${tagName}`);
       }
-      return new FakeCanvas("offscreen", root);
+      const canvas = new FakeCanvas(`buffer-${root.createdCanvases.length}`, root);
+      root.createdCanvases.push(canvas);
+      return canvas;
     },
     getElementById(id) {
       return elements[id] ?? null;
@@ -256,6 +259,17 @@ test("깊이 변환 실패 시 두 캔버스와 표시 프레임을 이전 상�
   assert.equal(root.getElementById("frame-readout").textContent, "0 / 1");
   assert.equal(root.getElementById("viewer-state").textContent, "오류");
   assert.equal(root.getElementById("viewer-error").hidden, false);
+});
+
+test("컬러맵 준비에는 두 재사용 버퍼만 사용한다", async (t) => {
+  const { root, viewer } = await createStartedViewer(t);
+
+  assert.equal(root.createdCanvases.length, 2);
+
+  viewer.depthMode = "colormap";
+  assert.equal(viewer.renderFrame(1), true);
+  assert.equal(viewer.renderFrame(0), true);
+  assert.equal(root.createdCanvases.length, 2);
 });
 
 test("캔버스 오류에 프레임과 데이터 종류 및 원인을 보존한다", async (t) => {

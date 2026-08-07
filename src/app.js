@@ -1,4 +1,4 @@
-import { colorizeDepthPixels } from "./depth.js";
+import { colorizeDepthPixelsInPlace } from "./depth.js";
 import { loadManifest, ManifestError } from "./manifest.js";
 import { SequencePlayer } from "./player.js";
 import { FrameLoadError, preloadFrames } from "./preload.js";
@@ -144,7 +144,6 @@ class ViewerController {
     this.elements = collectElements(root);
     this.colorBufferCanvas = root.createElement("canvas");
     this.depthBufferCanvas = root.createElement("canvas");
-    this.offscreenCanvas = root.createElement("canvas");
     this.manifest = null;
     this.frames = [];
     this.player = null;
@@ -282,21 +281,9 @@ class ViewerController {
         return;
       }
 
-      if (this.offscreenCanvas.width !== width || this.offscreenCanvas.height !== height) {
-        this.offscreenCanvas.width = width;
-        this.offscreenCanvas.height = height;
-      }
-      const offscreenContext = this.offscreenCanvas.getContext("2d", {
-        willReadFrequently: true,
-      });
-      if (!offscreenContext) {
-        throw new Error("깊이 프레임 변환용 캔버스를 사용할 수 없습니다.");
-      }
-
-      offscreenContext.clearRect(0, 0, width, height);
-      offscreenContext.drawImage(image, 0, 0, width, height);
-      const imageData = offscreenContext.getImageData(0, 0, width, height);
-      imageData.data.set(colorizeDepthPixels(imageData.data));
+      context.drawImage(image, 0, 0, width, height);
+      const imageData = context.getImageData(0, 0, width, height);
+      colorizeDepthPixelsInPlace(imageData.data);
       context.putImageData(imageData, 0, 0);
     } catch (cause) {
       throw new FrameRenderError(frameIndex, "depth", cause);
