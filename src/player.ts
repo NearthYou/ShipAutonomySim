@@ -1,6 +1,37 @@
-const ALLOWED_SPEEDS = new Set([0.5, 1, 2]);
+export type PlaybackSpeed = 0.5 | 1 | 2;
+export type PlaybackState = "paused" | "playing";
+export type FrameChangeHandler = (index: number) => boolean | void;
+export type PlayingChangeHandler = (isPlaying: boolean) => void;
+export type RequestFrame = (callback: FrameRequestCallback) => number;
+export type CancelFrame = (id: number) => void;
+
+export interface SequencePlayerOptions {
+  frameCount: number;
+  intervalMs: number;
+  onFrameChange?: FrameChangeHandler;
+  onPlayingChange?: PlayingChangeHandler;
+  requestFrame?: RequestFrame;
+  cancelFrame?: CancelFrame;
+}
+
+function isPlaybackSpeed(value: number): value is PlaybackSpeed {
+  return value === 0.5 || value === 1 || value === 2;
+}
 
 export class SequencePlayer {
+  readonly frameCount: number;
+  readonly intervalMs: number;
+  index = 0;
+  speed: PlaybackSpeed = 1;
+  private state: PlaybackState = "paused";
+  private readonly onFrameChange: FrameChangeHandler;
+  private readonly onPlayingChange: PlayingChangeHandler;
+  private readonly requestFrame: RequestFrame | undefined;
+  private readonly cancelFrame: CancelFrame | undefined;
+  private elapsedMs = 0;
+  private lastTimestamp: number | null = null;
+  private frameRequestId: number | null = null;
+
   constructor({
     frameCount,
     intervalMs,
@@ -8,7 +39,7 @@ export class SequencePlayer {
     onPlayingChange = () => {},
     requestFrame = globalThis.requestAnimationFrame?.bind(globalThis),
     cancelFrame = globalThis.cancelAnimationFrame?.bind(globalThis),
-  }) {
+  }: SequencePlayerOptions) {
     if (!Number.isInteger(frameCount) || frameCount < 1) {
       throw new RangeError("frameCount는 1 이상의 정수여야 합니다.");
     }
@@ -19,22 +50,19 @@ export class SequencePlayer {
 
     this.frameCount = frameCount;
     this.intervalMs = intervalMs;
-    this.index = 0;
-    this.speed = 1;
-    this.isPlaying = false;
-
     this.onFrameChange = onFrameChange;
     this.onPlayingChange = onPlayingChange;
     this.requestFrame = requestFrame;
     this.cancelFrame = cancelFrame;
 
-    this.elapsedMs = 0;
-    this.lastTimestamp = null;
-    this.frameRequestId = null;
     this.tick = this.tick.bind(this);
   }
 
-  play() {
+  get isPlaying(): boolean {
+    return this.state === "playing";
+  }
+
+  play(): void {
     if (this.isPlaying) {
       return;
     }
@@ -56,7 +84,7 @@ export class SequencePlayer {
     this.scheduleNextFrame();
   }
 
-  pause() {
+  pause(): void {
     if (!this.isPlaying) {
       return;
     }
@@ -71,22 +99,22 @@ export class SequencePlayer {
     this.setPlaying(false);
   }
 
-  restart() {
+  restart(): void {
     this.pause();
     this.updateIndex(0);
   }
 
-  previous() {
+  previous(): void {
     this.pause();
     this.updateIndex(this.index - 1);
   }
 
-  next() {
+  next(): void {
     this.pause();
     this.updateIndex(this.index + 1);
   }
 
-  seek(index) {
+  seek(index: unknown): void {
     if (!Number.isFinite(Number(index))) {
       throw new TypeError("프레임 위치는 숫자여야 합니다.");
     }
@@ -95,25 +123,23 @@ export class SequencePlayer {
     this.updateIndex(Math.round(Number(index)));
   }
 
-  setSpeed(speed) {
+  setSpeed(speed: unknown): void {
     const nextSpeed = Number(speed);
-    if (!ALLOWED_SPEEDS.has(nextSpeed)) {
+    if (!isPlaybackSpeed(nextSpeed)) {
       throw new RangeError("재생 속도는 0.5, 1, 2 중 하나여야 합니다.");
     }
 
     this.speed = nextSpeed;
   }
 
-  setPlaying(isPlaying) {
-    if (this.isPlaying === isPlaying) {
-      return;
-    }
-
-    this.isPlaying = isPlaying;
+  private setPlaying(isPlaying: boolean): void {
+    const nextState: PlaybackState = isPlaying ? "playing" : "paused";
+    if (this.state === nextState) return;
+    this.state = nextState;
     this.onPlayingChange(isPlaying);
   }
 
-  updateIndex(index) {
+  private updateIndex(index: number): boolean {
     const nextIndex = Math.min(Math.max(index, 0), this.frameCount - 1);
     if (nextIndex === this.index) {
       return true;
@@ -123,11 +149,14 @@ export class SequencePlayer {
     return this.onFrameChange(nextIndex) !== false;
   }
 
-  scheduleNextFrame() {
+  private scheduleNextFrame(): void {
+    if (typeof this.requestFrame !== "function") {
+      throw new Error("이 환경에서는 애니메이션 프레임을 요청할 수 없습니다.");
+    }
     this.frameRequestId = this.requestFrame(this.tick);
   }
 
-  tick(timestamp) {
+  private tick(timestamp: number): void {
     this.frameRequestId = null;
     if (!this.isPlaying) {
       return;

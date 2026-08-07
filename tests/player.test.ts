@@ -2,10 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { SequencePlayer } from "../src/player.js";
+import type { SequencePlayerOptions } from "../src/player.js";
 
-function createScheduler() {
+interface TestScheduler {
+  request: (callback: FrameRequestCallback) => number;
+  cancel: (id: number) => void;
+  run: (timestamp: number) => void;
+  readonly pendingCount: number;
+}
+
+function createScheduler(): TestScheduler {
   let nextId = 1;
-  const callbacks = new Map();
+  const callbacks = new Map<number, FrameRequestCallback>();
 
   return {
     request(callback) {
@@ -30,17 +38,21 @@ function createScheduler() {
   };
 }
 
-function createPlayer(overrides = {}) {
+function createPlayer(overrides: Partial<SequencePlayerOptions> = {}) {
   const scheduler = createScheduler();
-  const frameChanges = [];
-  const playingChanges = [];
+  const frameChanges: number[] = [];
+  const playingChanges: boolean[] = [];
   const player = new SequencePlayer({
     frameCount: 3,
     intervalMs: 100,
-    onFrameChange: (index) => frameChanges.push(index),
-    onPlayingChange: (isPlaying) => playingChanges.push(isPlaying),
-    requestFrame: (callback) => scheduler.request(callback),
-    cancelFrame: (id) => scheduler.cancel(id),
+    onFrameChange: (index) => {
+      frameChanges.push(index);
+    },
+    onPlayingChange: (isPlaying) => {
+      playingChanges.push(isPlaying);
+    },
+    requestFrame: scheduler.request,
+    cancelFrame: scheduler.cancel,
     ...overrides,
   });
 
@@ -146,7 +158,7 @@ test("마지막 프레임에 도달하면 재생을 멈춘다", () => {
 
 test("프레임 변경 처리 중 멈추면 다음 애니메이션 프레임을 예약하지 않는다", () => {
   const scheduler = createScheduler();
-  let player;
+  let player: SequencePlayer;
   player = new SequencePlayer({
     frameCount: 3,
     intervalMs: 100,
@@ -179,7 +191,7 @@ test("마지막 프레임에서 재생하면 처음부터 다시 시작한다", 
 
 test("마지막 프레임의 초기 렌더가 실패하면 오류 상태로 정지한다", () => {
   const scheduler = createScheduler();
-  const playingChanges = [];
+  const playingChanges: boolean[] = [];
   let viewerState = "준비됨";
   const player = new SequencePlayer({
     frameCount: 3,
