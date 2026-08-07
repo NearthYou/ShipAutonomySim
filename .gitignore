@@ -1,0 +1,6 @@
+/color_*.png
+/depth_*.png
+/manifest.json
+/browser-artifacts/
+__pycache__/
+*.py[cod]
