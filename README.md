@@ -2,13 +2,15 @@
 
 `manifest.json`에 기록된 컬러 및 깊이 PNG 시퀀스를 두 캔버스에 표시하고 같은 시간축에서 재생하는 정적 웹 뷰어입니다.
 
-외부 웹 라이브러리와 빌드 과정이 없습니다. 애플리케이션 실행에는 Python 3과 최신 브라우저만 필요합니다.
+외부 런타임 라이브러리와 번들러는 사용하지 않습니다. TypeScript는 개발 시 ES 모듈을 컴파일하는 데만 사용하며, 실행에는 Node.js와 npm, Python 3, 최신 브라우저가 필요합니다.
 
 ## 빠른 실행
 
-저장소 루트에서 더미 데이터를 생성합니다.
+저장소 루트에서 개발 도구를 설치하고 TypeScript를 빌드한 뒤 더미 데이터를 생성합니다.
 
 ```powershell
+npm ci
+npm run build
 python scripts/generate_dummy_data.py
 ```
 
@@ -25,6 +27,8 @@ http://localhost:8000
 ```
 
 브라우저 보안 정책 때문에 `index.html`을 `file://`로 직접 열지 마세요. 서버를 종료할 때는 실행 중인 터미널에서 `Ctrl+C`를 누릅니다.
+
+브라우저는 `dist/src/app.js`의 컴파일된 ES 모듈을 실행합니다. `dist`는 빌드할 때 생성되며 Git에서 추적하지 않습니다.
 
 ## 더미 데이터
 
@@ -79,10 +83,10 @@ python scripts/generate_dummy_data.py --frames 30 --width 640 --height 360 --int
 
 ## 자동 검사
 
-JavaScript 검사는 Node.js 내장 테스트 러너를 사용하며 패키지 설치가 필요 없습니다.
+TypeScript 빌드와 컴파일된 JavaScript 검사는 Node.js 내장 테스트 러너를 사용합니다.
 
 ```powershell
-node --test
+npm test
 ```
 
 더미 생성기 검사는 Python 내장 `unittest`를 사용합니다.
@@ -107,12 +111,15 @@ manifest 내용이 잘못되었다는 메시지가 보이면 화면에 표시된
 
 - `index.html`: 두 캔버스와 재생 조작 화면
 - `styles.css`: 데스크톱과 모바일 반응형 표현
-- `src/manifest.js`: 입력 검증과 이미지 경로 해석
-- `src/preload.js`: 전체 이미지 선로딩과 진행률
-- `src/player.js`: 프레임 탐색과 재생 시계
-- `src/depth.js`: 깊이 컬러맵 변환
-- `src/app.js`: 데이터, 캔버스와 화면 조작 연결
+- `src/manifest.ts`: 입력 검증과 이미지 경로 해석
+- `src/preload.ts`: 전체 이미지 선로딩과 진행률
+- `src/player.ts`: 프레임 탐색과 재생 시계
+- `src/depth.ts`: 깊이 컬러맵 변환
+- `src/app.ts`: 데이터, 캔버스와 화면 조작 연결
+- `tsconfig.json`: 제품 코드와 Node 테스트의 단일 TypeScript 컴파일 설정
+- `package-lock.json`: 개발 도구 버전과 무결성 잠금
+- `dist/`: 빌드로 생성되는 비추적 JavaScript 출력
 - `scripts/generate_dummy_data.py`: 표준 라이브러리 더미 데이터 생성기
-- `tests/`: JavaScript와 Python 자동 검사
+- `tests/`: TypeScript와 Python 자동 검사
 
 이 저장소는 정적 이미지 시퀀스 웹 뷰어만 다룹니다.
