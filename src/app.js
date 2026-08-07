@@ -200,8 +200,9 @@ class ViewerController {
       this.elements["frame-slider"].value = String(index);
       this.elements["frame-readout"].value = `${frame.index} / ${this.frames.length - 1}`;
       this.elements["frame-readout"].textContent = `${frame.index} / ${this.frames.length - 1}`;
-      this.elements["time-readout"].value = formatElapsed(frame.time_ms);
-      this.elements["time-readout"].textContent = formatElapsed(frame.time_ms);
+      const elapsed = formatElapsed(frame.time_ms);
+      this.elements["time-readout"].value = elapsed;
+      this.elements["time-readout"].textContent = elapsed;
       return true;
     } catch (error) {
       this.showError(error);
@@ -225,13 +226,16 @@ class ViewerController {
       return;
     }
 
-    this.offscreenCanvas.width = width;
-    this.offscreenCanvas.height = height;
+    if (this.offscreenCanvas.width !== width || this.offscreenCanvas.height !== height) {
+      this.offscreenCanvas.width = width;
+      this.offscreenCanvas.height = height;
+    }
     const offscreenContext = this.offscreenCanvas.getContext("2d", { willReadFrequently: true });
     if (!offscreenContext) {
       throw new Error("깊이 프레임 변환용 캔버스를 사용할 수 없습니다.");
     }
 
+    offscreenContext.clearRect(0, 0, width, height);
     offscreenContext.drawImage(image, 0, 0, width, height);
     const imageData = offscreenContext.getImageData(0, 0, width, height);
     imageData.data.set(colorizeDepthPixels(imageData.data));

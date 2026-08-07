@@ -6,7 +6,7 @@ const COLOR_STOPS = [
   [1, [210, 35, 42]],
 ];
 
-export function mapDepthIntensity(value) {
+function writeDepthColor(value, target, offset) {
   const normalized = Math.min(Math.max(Number(value), 0), 255) / 255;
 
   for (let index = 1; index < COLOR_STOPS.length; index += 1) {
@@ -19,12 +19,24 @@ export function mapDepthIntensity(value) {
     const range = upperPosition - lowerPosition;
     const amount = (normalized - lowerPosition) / range;
 
-    return lowerColor.map((channel, channelIndex) =>
-      Math.round(channel + (upperColor[channelIndex] - channel) * amount),
-    );
+    for (let channel = 0; channel < 3; channel += 1) {
+      target[offset + channel] = Math.round(
+        lowerColor[channel] + (upperColor[channel] - lowerColor[channel]) * amount,
+      );
+    }
+    return;
   }
 
-  return [...COLOR_STOPS.at(-1)[1]];
+  const lastColor = COLOR_STOPS.at(-1)[1];
+  for (let channel = 0; channel < 3; channel += 1) {
+    target[offset + channel] = lastColor[channel];
+  }
+}
+
+export function mapDepthIntensity(value) {
+  const color = [0, 0, 0];
+  writeDepthColor(value, color, 0);
+  return color;
 }
 
 export function colorizeDepthPixels(pixels) {
@@ -36,10 +48,7 @@ export function colorizeDepthPixels(pixels) {
 
   for (let offset = 0; offset < pixels.length; offset += 4) {
     const intensity = (pixels[offset] + pixels[offset + 1] + pixels[offset + 2]) / 3;
-    const [red, green, blue] = mapDepthIntensity(intensity);
-    result[offset] = red;
-    result[offset + 1] = green;
-    result[offset + 2] = blue;
+    writeDepthColor(intensity, result, offset);
   }
 
   return result;

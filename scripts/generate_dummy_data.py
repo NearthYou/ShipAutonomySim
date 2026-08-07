@@ -61,16 +61,20 @@ def color_rows(frame_index: int, frame_count: int, width: int, height: int) -> l
         frame_index, frame_count, width, height
     )
     radius_squared = radius * radius
+    width_scale = max(1, width - 1)
+    height_scale = max(1, height - 1)
+    grid_width = max(8, width // 8)
+    grid_height = max(8, height // 6)
     rows: list[bytes] = []
 
     for y in range(height):
         row = bytearray()
         for x in range(width):
-            red = 12 + round(18 * x / max(1, width - 1))
-            green = 18 + round(18 * y / max(1, height - 1))
-            blue = 28 + round(20 * (1 - x / max(1, width - 1)))
+            red = 12 + round(18 * x / width_scale)
+            green = 18 + round(18 * y / height_scale)
+            blue = 28 + round(20 * (1 - x / width_scale))
 
-            if x % max(8, width // 8) == 0 or y % max(8, height // 6) == 0:
+            if x % grid_width == 0 or y % grid_height == 0:
                 red += 9
                 green += 9
                 blue += 9
@@ -93,12 +97,13 @@ def depth_rows(frame_index: int, frame_count: int, width: int, height: int) -> l
     )
     radius_squared = radius * radius
     near_intensity = round(90 + 150 * progress)
+    height_scale = max(1, height - 1)
     rows: list[bytes] = []
 
     for y in range(height):
         row = bytearray()
         for x in range(width):
-            value = 20 + round(14 * y / max(1, height - 1))
+            value = 20 + round(14 * y / height_scale)
             distance_squared = (x - center_x) ** 2 + (y - center_y) ** 2
             if distance_squared <= radius_squared:
                 distance = math.sqrt(distance_squared) / max(1, radius)

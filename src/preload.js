@@ -15,8 +15,18 @@ export function loadImage(url, ImageConstructor = globalThis.Image) {
 
     const image = new ImageConstructor();
     image.decoding = "async";
-    image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error(`이미지 요청에 실패했습니다: ${url}`));
+    const clearHandlers = () => {
+      image.onload = null;
+      image.onerror = null;
+    };
+    image.onload = () => {
+      clearHandlers();
+      resolve(image);
+    };
+    image.onerror = () => {
+      clearHandlers();
+      reject(new Error(`이미지 요청에 실패했습니다: ${url}`));
+    };
     image.src = url;
   });
 }
