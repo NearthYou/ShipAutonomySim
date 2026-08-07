@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 
 import {
   describeViewerError,
@@ -9,6 +9,7 @@ import {
 } from "../src/app.js";
 import { ManifestError } from "../src/manifest.js";
 import { FrameLoadError } from "../src/preload.js";
+import type { LoadableImage } from "../src/preload.js";
 
 const VIEWER_ELEMENT_IDS = [
   "color-canvas",
@@ -33,33 +34,70 @@ const VIEWER_ELEMENT_IDS = [
   "viewer-state",
 ];
 
+type FakeListener = (event: Event) => void;
+
 class FakeElement {
-  constructor(id) {
+  readonly id: string;
+  readonly attributes = new Map<string, string>();
+  disabled = false;
+  hidden: boolean;
+  readonly listeners = new Map<string, FakeListener>();
+  textContent = "";
+  value = "";
+  max = "";
+
+  constructor(id: string) {
     this.id = id;
-    this.attributes = new Map();
-    this.disabled = false;
     this.hidden = id === "viewer-error";
-    this.listeners = new Map();
-    this.textContent = "";
-    this.value = "";
   }
 
-  addEventListener(type, listener) {
+  addEventListener(type: string, listener: FakeListener): void {
     this.listeners.set(type, listener);
   }
 
-  setAttribute(name, value) {
+  setAttribute(name: string, value: string): void {
     this.attributes.set(name, value);
   }
 }
 
+interface FakeDrawable {
+  source?: string;
+  lastSource?: string | null;
+}
+
+interface FakeImageData {
+  data: Uint8ClampedArray;
+  source: string | null;
+}
+
+interface FakeCanvasContext {
+  clearRect(): void;
+  drawImage(image: FakeDrawable): void;
+  getImageData(x: number, y: number, width: number, height: number): FakeImageData;
+  putImageData(imageData: FakeImageData): void;
+}
+
+interface FakeRoot {
+  readonly createdCanvases: FakeCanvas[];
+  readonly depthCommitError: Error;
+  readonly depthReadError: Error;
+  failDepthCommit: boolean;
+  failDepthRead: boolean;
+  createElement(tagName: string): FakeCanvas;
+  getElementById(id: string): FakeElement;
+  querySelectorAll(selector: string): FakeElement[];
+}
+
 class FakeCanvas extends FakeElement {
-  constructor(id, root) {
+  readonly root: FakeRoot;
+  width = 640;
+  height = 360;
+  lastSource: string | null = null;
+  readonly context: FakeCanvasContext;
+
+  constructor(id: string, root: FakeRoot) {
     super(id);
     this.root = root;
-    this.width = 640;
-    this.height = 360;
-    this.lastSource = null;
     this.context = {
       clearRect: () => {
         this.lastSource = null;
@@ -68,17 +106,16 @@ class FakeCanvas extends FakeElement {
         if (this.id === "depth-canvas" && this.root.failDepthCommit) {
           throw this.root.depthCommitError;
         }
-        this.lastSource = image.source ?? image.lastSource;
+        this.lastSource = image.source ?? image.lastSource ?? null;
       },
-      getImageData: (x, y, width, height) => {
+      getImageData: (_x, _y, width, height) => {
         if (this.root.failDepthRead) {
           throw this.root.depthReadError;
         }
-        const imageData = {
+        return {
           data: new Uint8ClampedArray(width * height * 4),
           source: this.lastSource,
         };
-        return imageData;
       },
       putImageData: (imageData) => {
         this.lastSource = imageData.source;
@@ -86,36 +123,20 @@ class FakeCanvas extends FakeElement {
     };
   }
 
-  getContext(type) {
+  getContext(type: string): FakeCanvasContext | null {
     return type === "2d" ? this.context : null;
   }
 }
 
-function createFakeRoot() {
-  const root = {
+function createFakeRoot(): FakeRoot {
+  const elements: Record<string, FakeElement> = {};
+  const controls: FakeElement[] = [];
+  const root: FakeRoot = {
     createdCanvases: [],
     depthCommitError: new Error("깊이 캔버스 반영 실패"),
     depthReadError: new Error("깊이 픽셀 읽기 실패"),
     failDepthCommit: false,
     failDepthRead: false,
-  };
-  const elements = Object.fromEntries(
-    VIEWER_ELEMENT_IDS.map((id) => [
-      id,
-      id.endsWith("canvas") ? new FakeCanvas(id, root) : new FakeElement(id),
-    ]),
-  );
-  const controls = [
-    "depth-mode",
-    "frame-slider",
-    "next-frame",
-    "play-toggle",
-    "playback-speed",
-    "previous-frame",
-    "restart",
-  ].map((id) => elements[id]);
-
-  return Object.assign(root, {
     createElement(tagName) {
       if (tagName !== "canvas") {
         throw new Error(`지원하지 않는 테스트 요소입니다: ${tagName}`);
@@ -125,35 +146,71 @@ function createFakeRoot() {
       return canvas;
     },
     getElementById(id) {
-      return elements[id] ?? null;
+      const element = elements[id];
+      if (!element) throw new Error(`테스트 화면 요소를 찾을 수 없습니다: ${id}`);
+      return element;
     },
     querySelectorAll(selector) {
       return selector === "[data-viewer-control]" ? controls : [];
     },
-  });
-}
+  };
 
-class LoadedImage {
-  constructor() {
-    this.naturalWidth = 2;
-    this.naturalHeight = 1;
-    this.onload = null;
-    this.onerror = null;
+  for (const id of VIEWER_ELEMENT_IDS) {
+    elements[id] = id.endsWith("canvas") ? new FakeCanvas(id, root) : new FakeElement(id);
   }
 
-  set src(value) {
+  for (const id of [
+    "depth-mode",
+    "frame-slider",
+    "next-frame",
+    "play-toggle",
+    "playback-speed",
+    "previous-frame",
+    "restart",
+  ]) {
+    controls.push(root.getElementById(id));
+  }
+
+  return root;
+}
+
+function getFakeCanvas(root: FakeRoot, id: string): FakeCanvas {
+  const element = root.getElementById(id);
+  assert.ok(element instanceof FakeCanvas);
+  return element;
+}
+
+class LoadedImage implements LoadableImage {
+  decoding: LoadableImage["decoding"] = "auto";
+  naturalWidth = 2;
+  naturalHeight = 1;
+  width = 2;
+  height = 1;
+  onload: ((event: Event) => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
+  source = "";
+
+  get src(): string {
+    return this.source;
+  }
+
+  set src(value: string) {
     this.source = value;
-    queueMicrotask(() => this.onload?.());
+    queueMicrotask(() => this.onload?.(new Event("load")));
   }
 }
 
-async function createStartedViewer(t) {
+async function startTestViewer(root: FakeRoot) {
+  return startViewer(root as unknown as Document);
+}
+
+async function createStartedViewer(t: TestContext) {
   const originalFetch = globalThis.fetch;
   const originalImage = globalThis.Image;
   const originalConsoleError = console.error;
   const hadImage = Object.hasOwn(globalThis, "Image");
   const root = createFakeRoot();
-  const reportedErrors = [];
+  const reportedErrors: unknown[] = [];
   const manifest = {
     frame_count: 2,
     interval_ms: 100,
@@ -164,8 +221,7 @@ async function createStartedViewer(t) {
       { index: 1, color: "color_000001.png", depth: "depth_000001.png", time_ms: 100 },
     ],
   };
-
-  globalThis.fetch = async () => ({
+  const fakeFetch = async () => ({
     ok: true,
     status: 200,
     url: "https://viewer.test/manifest.json",
@@ -173,20 +229,24 @@ async function createStartedViewer(t) {
       return manifest;
     },
   });
-  globalThis.Image = LoadedImage;
-  console.error = (label, error) => reportedErrors.push(error);
+
+  globalThis.fetch = fakeFetch as unknown as typeof fetch;
+  globalThis.Image = LoadedImage as unknown as typeof Image;
+  console.error = (...data: unknown[]) => {
+    reportedErrors.push(data[1]);
+  };
 
   t.after(() => {
     globalThis.fetch = originalFetch;
     if (hadImage) {
       globalThis.Image = originalImage;
     } else {
-      delete globalThis.Image;
+      Reflect.deleteProperty(globalThis, "Image");
     }
     console.error = originalConsoleError;
   });
 
-  const viewer = await startViewer(root);
+  const viewer = await startTestViewer(root);
   return { reportedErrors, root, viewer };
 }
 
@@ -249,25 +309,40 @@ test("이미지 시간 초과에는 파일 경로와 서버 응답 확인을 안
 
 test("깊이 변환 실패 시 두 캔버스와 표시 프레임을 이전 상태로 유지한다", async (t) => {
   const { root, viewer } = await createStartedViewer(t);
-  const colorCanvas = root.getElementById("color-canvas");
-  const depthCanvas = root.getElementById("depth-canvas");
-  assert.match(colorCanvas.lastSource, /color_000000\.png/);
-  assert.match(depthCanvas.lastSource, /depth_000000\.png/);
+  const colorCanvas = getFakeCanvas(root, "color-canvas");
+  const depthCanvas = getFakeCanvas(root, "depth-canvas");
+  assert.match(colorCanvas.lastSource ?? "", /color_000000\.png/);
+  assert.match(depthCanvas.lastSource ?? "", /depth_000000\.png/);
 
   viewer.depthMode = "colormap";
   root.failDepthRead = true;
   const didRender = viewer.renderFrame(1);
 
   assert.equal(didRender, false);
-  assert.match(colorCanvas.lastSource, /color_000000\.png/);
-  assert.match(depthCanvas.lastSource, /depth_000000\.png/);
+  assert.match(colorCanvas.lastSource ?? "", /color_000000\.png/);
+  assert.match(depthCanvas.lastSource ?? "", /depth_000000\.png/);
   assert.equal(root.getElementById("frame-readout").textContent, "0 / 1");
   assert.equal(root.getElementById("viewer-state").textContent, "오류");
   assert.equal(root.getElementById("viewer-error").hidden, false);
+  assert.ok(
+    root.querySelectorAll("[data-viewer-control]").every((control) => control.disabled),
+  );
 });
 
 test("컬러맵 준비에는 두 재사용 버퍼만 사용한다", async (t) => {
   const { root, viewer } = await createStartedViewer(t);
+  const playToggle = root.getElementById("play-toggle");
+  assert.equal(playToggle.attributes.get("aria-label"), undefined);
+  viewer.updatePlayingState(true);
+  assert.equal(playToggle.attributes.get("aria-label"), "일시정지");
+  viewer.updatePlayingState(false);
+  assert.equal(playToggle.attributes.get("aria-label"), "재생");
+
+  const depthMode = root.getElementById("depth-mode");
+  const clickDepthMode = depthMode.listeners.get("click");
+  assert.ok(clickDepthMode);
+  clickDepthMode(new Event("click"));
+  assert.equal(depthMode.attributes.get("aria-pressed"), "true");
 
   assert.equal(root.createdCanvases.length, 2);
 
@@ -279,8 +354,8 @@ test("컬러맵 준비에는 두 재사용 버퍼만 사용한다", async (t) =>
 
 test("깊이 캔버스 반영 실패 시 두 출력을 비우고 표시 프레임을 유지한다", async (t) => {
   const { reportedErrors, root, viewer } = await createStartedViewer(t);
-  const colorCanvas = root.getElementById("color-canvas");
-  const depthCanvas = root.getElementById("depth-canvas");
+  const colorCanvas = getFakeCanvas(root, "color-canvas");
+  const depthCanvas = getFakeCanvas(root, "depth-canvas");
   root.failDepthCommit = true;
 
   const didRender = viewer.renderFrame(1);
@@ -292,6 +367,7 @@ test("깊이 캔버스 반영 실패 시 두 출력을 비우고 표시 프레�
   assert.equal(root.getElementById("viewer-state").textContent, "오류");
   assert.equal(root.getElementById("viewer-error").hidden, false);
   const error = reportedErrors.at(-1);
+  assert.ok(error instanceof FrameRenderError);
   assert.equal(error.name, "FrameRenderError");
   assert.equal(error.frameIndex, 1);
   assert.equal(error.kind, "depth");
@@ -310,6 +386,7 @@ test("캔버스 오류에 프레임과 데이터 종류 및 원인을 보존한�
   viewer.renderFrame(1);
 
   const error = reportedErrors.at(-1);
+  assert.ok(error instanceof FrameRenderError);
   assert.equal(error.name, "FrameRenderError");
   assert.equal(error.frameIndex, 1);
   assert.equal(error.kind, "depth");
