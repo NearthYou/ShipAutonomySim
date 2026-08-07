@@ -42,6 +42,8 @@ python scripts/generate_dummy_data.py --frames 30 --width 640 --height 360 --int
 
 뷰어는 저장소 루트의 `manifest.json`을 읽습니다. 컬러와 깊이 파일을 저장소 루트 또는 manifest에서 지정한 상대 경로에 둡니다. 이미지 경로는 `manifest.json`의 위치를 기준으로 해석됩니다.
 
+컬러와 깊이 이미지 URL은 `manifest.json`과 동일한 출처여야 합니다. 상대 경로와 같은 출처의 절대 URL은 허용하지만 프로토콜, 호스트 또는 포트가 다른 교차 출처 URL은 CORS 헤더와 관계없이 manifest 검증 단계에서 거부합니다.
+
 입력 형식은 다음과 같습니다.
 
 ```json

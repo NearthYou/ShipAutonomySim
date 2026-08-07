@@ -42,11 +42,22 @@ function requireNonEmptyString(value, field) {
 }
 
 function resolveFrameUrl(path, manifestUrl, field) {
+  let resolvedUrl;
+  let resolvedManifestUrl;
   try {
-    return new URL(path, manifestUrl).href;
+    resolvedUrl = new URL(path, manifestUrl);
+    resolvedManifestUrl = new URL(manifestUrl);
   } catch (cause) {
     throw new ManifestError(`${field} 경로를 해석할 수 없습니다.`, { cause });
   }
+
+  if (resolvedUrl.origin !== resolvedManifestUrl.origin) {
+    throw new ManifestError(
+      `${field}는 manifest.json과 동일한 출처여야 합니다. manifest 기준 상대 경로 또는 같은 출처의 절대 URL을 사용하세요.`,
+    );
+  }
+
+  return resolvedUrl.href;
 }
 
 export function validateManifest(value, manifestUrl) {

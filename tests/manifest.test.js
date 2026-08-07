@@ -55,6 +55,29 @@ test("manifest 위치를 기준으로 프레임 URL을 해석한다", () => {
   assert.equal(manifest.frames[0].colorUrl, undefined);
 });
 
+test("동일 출처의 절대 이미지 URL을 허용한다", () => {
+  const manifest = validManifest();
+  manifest.frames[0].color = "https://example.test/sequences/color_000000.png";
+
+  const result = validateManifest(manifest, MANIFEST_URL);
+
+  assert.equal(result.frames[0].colorUrl, manifest.frames[0].color);
+});
+
+test("교차 출처 이미지 URL을 manifest 검증에서 거부한다", () => {
+  const manifest = validManifest();
+  manifest.frames[0].depth = "https://assets.example.test/depth_000000.png";
+
+  assert.throws(
+    () => validateManifest(manifest, MANIFEST_URL),
+    (error) =>
+      error instanceof ManifestError &&
+      /frames\[0\]\.depth/.test(error.message) &&
+      /동일한 출처/.test(error.message) &&
+      /상대 경로/.test(error.message),
+  );
+});
+
 test("프레임 수와 배열 길이가 다르면 거부한다", () => {
   const manifest = validManifest();
   manifest.frame_count = 3;
