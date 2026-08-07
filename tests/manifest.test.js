@@ -220,3 +220,35 @@ test("signal을 무시하는 manifest 요청도 제한 시간 뒤 중단한다",
 
   assert.equal(receivedSignal.aborted, true);
 });
+
+test("manifest 본문 JSON 해석도 하나의 제한 시간 안에 중단한다", async () => {
+  let receivedSignal;
+  const response = {
+    ok: true,
+    status: 200,
+    url: MANIFEST_URL,
+    json() {
+      return new Promise(() => {});
+    },
+  };
+
+  await assert.rejects(
+    withTestDeadline(
+      loadManifest(
+        "./manifest.json",
+        async (url, options) => {
+          receivedSignal = options.signal;
+          return response;
+        },
+        { timeoutMs: 5 },
+      ),
+      100,
+    ),
+    (error) =>
+      error instanceof ManifestError &&
+      error.cause?.name === "TimeoutError" &&
+      /시간 초과/.test(error.message),
+  );
+
+  assert.equal(receivedSignal.aborted, true);
+});

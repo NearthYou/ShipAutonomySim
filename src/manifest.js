@@ -120,7 +120,6 @@ export async function loadManifest(
   fetchImpl = globalThis.fetch,
   { timeoutMs = DEFAULT_MANIFEST_TIMEOUT_MS } = {},
 ) {
-  let response;
   const controller = new AbortController();
   let timeoutId;
   const timeout = new Promise((resolve, reject) => {
@@ -131,14 +130,37 @@ export async function loadManifest(
       controller.abort(cause);
     }, timeoutMs);
   });
+  const request = Promise.resolve().then(async () => {
+    let response;
+    try {
+      response = await fetchImpl(url, { cache: "no-store", signal: controller.signal });
+    } catch (cause) {
+      throw new ManifestError(
+        "manifest.json을 가져오지 못했습니다. 로컬 HTTP 서버와 파일 위치를 확인하세요.",
+        { cause },
+      );
+    }
 
+    if (!response?.ok) {
+      const status = response?.status ?? "알 수 없음";
+      throw new ManifestError(
+        `manifest.json 요청에 실패했습니다. HTTP 상태: ${status}. 파일 위치를 확인하세요.`,
+      );
+    }
+
+    let value;
+    try {
+      value = await response.json();
+    } catch (cause) {
+      throw new ManifestError("manifest.json이 올바른 JSON 형식이 아닙니다.", { cause });
+    }
+
+    return { response, value };
+  });
+
+  let result;
   try {
-    response = await Promise.race([
-      Promise.resolve().then(() =>
-        fetchImpl(url, { cache: "no-store", signal: controller.signal }),
-      ),
-      timeout,
-    ]);
+    result = await Promise.race([request, timeout]);
   } catch (cause) {
     if (cause?.name === "TimeoutError") {
       throw new ManifestError(
@@ -147,28 +169,12 @@ export async function loadManifest(
       );
     }
 
-    throw new ManifestError(
-      "manifest.json을 가져오지 못했습니다. 로컬 HTTP 서버와 파일 위치를 확인하세요.",
-      { cause },
-    );
+    throw cause;
   } finally {
     clearTimeout(timeoutId);
   }
 
-  if (!response?.ok) {
-    const status = response?.status ?? "알 수 없음";
-    throw new ManifestError(
-      `manifest.json 요청에 실패했습니다. HTTP 상태: ${status}. 파일 위치를 확인하세요.`,
-    );
-  }
-
-  let value;
-  try {
-    value = await response.json();
-  } catch (cause) {
-    throw new ManifestError("manifest.json이 올바른 JSON 형식이 아닙니다.", { cause });
-  }
-
+  const { response, value } = result;
   const baseUrl = response.url || new URL(url, globalThis.location?.href ?? "http://localhost/").href;
   return validateManifest(value, baseUrl);
 }
