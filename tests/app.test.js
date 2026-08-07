@@ -65,6 +65,9 @@ class FakeCanvas extends FakeElement {
         this.lastSource = null;
       },
       drawImage: (image) => {
+        if (this.id === "depth-canvas" && this.root.failDepthCommit) {
+          throw this.root.depthCommitError;
+        }
         this.lastSource = image.source ?? image.lastSource;
       },
       getImageData: (x, y, width, height) => {
@@ -91,7 +94,9 @@ class FakeCanvas extends FakeElement {
 function createFakeRoot() {
   const root = {
     createdCanvases: [],
+    depthCommitError: new Error("깊이 캔버스 반영 실패"),
     depthReadError: new Error("깊이 픽셀 읽기 실패"),
+    failDepthCommit: false,
     failDepthRead: false,
   };
   const elements = Object.fromEntries(
@@ -270,6 +275,31 @@ test("컬러맵 준비에는 두 재사용 버퍼만 사용한다", async (t) =>
   assert.equal(viewer.renderFrame(1), true);
   assert.equal(viewer.renderFrame(0), true);
   assert.equal(root.createdCanvases.length, 2);
+});
+
+test("깊이 캔버스 반영 실패 시 두 출력을 비우고 표시 프레임을 유지한다", async (t) => {
+  const { reportedErrors, root, viewer } = await createStartedViewer(t);
+  const colorCanvas = root.getElementById("color-canvas");
+  const depthCanvas = root.getElementById("depth-canvas");
+  root.failDepthCommit = true;
+
+  const didRender = viewer.renderFrame(1);
+
+  assert.equal(didRender, false);
+  assert.equal(colorCanvas.lastSource, null);
+  assert.equal(depthCanvas.lastSource, null);
+  assert.equal(root.getElementById("frame-readout").textContent, "0 / 1");
+  assert.equal(root.getElementById("viewer-state").textContent, "오류");
+  assert.equal(root.getElementById("viewer-error").hidden, false);
+  const error = reportedErrors.at(-1);
+  assert.equal(error.name, "FrameRenderError");
+  assert.equal(error.frameIndex, 1);
+  assert.equal(error.kind, "depth");
+  assert.equal(error.cause, root.depthCommitError);
+  const message = root.getElementById("viewer-error-message").textContent;
+  assert.match(message, /프레임 1/);
+  assert.match(message, /깊이/);
+  assert.match(message, /깊이 캔버스 반영 실패/);
 });
 
 test("캔버스 오류에 프레임과 데이터 종류 및 원인을 보존한다", async (t) => {
