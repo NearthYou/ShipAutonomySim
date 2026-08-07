@@ -28,12 +28,12 @@ function validManifest() {
   };
 }
 
-async function withTestDeadline(promise, timeoutMs = 250) {
-  let timeoutId;
+async function withTestDeadline<T>(promise: Promise<T>, timeoutMs = 250): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       promise,
-      new Promise((resolve, reject) => {
+      new Promise<never>((_resolve, reject) => {
         timeoutId = setTimeout(
           () => reject(new Error("테스트 제한 시간 안에 요청이 끝나야 합니다.")),
           timeoutMs,
@@ -41,7 +41,7 @@ async function withTestDeadline(promise, timeoutMs = 250) {
       }),
     ]);
   } finally {
-    clearTimeout(timeoutId);
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
   }
 }
 
@@ -50,9 +50,15 @@ test("manifest 위치를 기준으로 프레임 URL을 해석한다", () => {
 
   const result = validateManifest(manifest, MANIFEST_URL);
 
-  assert.equal(result.frames[0].colorUrl, "https://example.test/sequences/color_000000.png");
-  assert.equal(result.frames[1].depthUrl, "https://example.test/sequences/depth_000001.png");
-  assert.equal(manifest.frames[0].colorUrl, undefined);
+  assert.equal(result.frameCount, 2);
+  assert.equal(result.intervalMs, 100);
+  assert.deepEqual(result.depthRange, { nearCm: 0, farCm: 5000 });
+  assert.equal(result.frames[0]?.color.sourcePath, "color_000000.png");
+  assert.equal(
+    result.frames[0]?.color.url,
+    "https://example.test/sequences/color_000000.png",
+  );
+  assert.equal(result.frames[1]?.depth.kind, "depth");
 });
 
 test("동일 출처의 절대 이미지 URL을 허용한다", () => {
@@ -61,7 +67,7 @@ test("동일 출처의 절대 이미지 URL을 허용한다", () => {
 
   const result = validateManifest(manifest, MANIFEST_URL);
 
-  assert.equal(result.frames[0].colorUrl, manifest.frames[0].color);
+  assert.equal(result.frames[0]?.color.url, manifest.frames[0]?.color);
 });
 
 test("교차 출처 이미지 URL을 manifest 검증에서 거부한다", () => {
@@ -150,8 +156,11 @@ test("HTTP 응답의 최종 URL을 사용해 manifest를 불러온다", async ()
 
   const result = await loadManifest("./manifest.json", async () => response);
 
-  assert.equal(result.frame_count, 2);
-  assert.equal(result.frames[0].depthUrl, "https://example.test/sequences/depth_000000.png");
+  assert.equal(result.frameCount, 2);
+  assert.equal(
+    result.frames[0]?.depth.url,
+    "https://example.test/sequences/depth_000000.png",
+  );
 });
 
 test("HTTP 오류를 사용자가 이해할 수 있는 manifest 오류로 바꾼다", async () => {
@@ -160,6 +169,9 @@ test("HTTP 오류를 사용자가 이해할 수 있는 manifest 오류로 바꾼
     status: 404,
     statusText: "Not Found",
     url: MANIFEST_URL,
+    async json() {
+      return validManifest();
+    },
   };
 
   await assert.rejects(
@@ -198,8 +210,8 @@ test("네트워크 실패 원인을 보존한다", async () => {
 });
 
 test("signal을 무시하는 manifest 요청도 제한 시간 뒤 중단한다", async () => {
-  let receivedSignal;
-  const neverSettles = new Promise(() => {});
+  let receivedSignal: AbortSignal | undefined;
+  const neverSettles = new Promise<never>(() => {});
 
   await assert.rejects(
     withTestDeadline(
@@ -214,15 +226,17 @@ test("signal을 무시하는 manifest 요청도 제한 시간 뒤 중단한다",
     ),
     (error) =>
       error instanceof ManifestError &&
-      error.cause?.name === "TimeoutError" &&
+      error.cause instanceof Error &&
+      error.cause.name === "TimeoutError" &&
       /시간 초과/.test(error.message),
   );
 
+  assert.ok(receivedSignal);
   assert.equal(receivedSignal.aborted, true);
 });
 
 test("manifest 본문 JSON 해석도 하나의 제한 시간 안에 중단한다", async () => {
-  let receivedSignal;
+  let receivedSignal: AbortSignal | undefined;
   const response = {
     ok: true,
     status: 200,
@@ -246,9 +260,11 @@ test("manifest 본문 JSON 해석도 하나의 제한 시간 안에 중단한다
     ),
     (error) =>
       error instanceof ManifestError &&
-      error.cause?.name === "TimeoutError" &&
+      error.cause instanceof Error &&
+      error.cause.name === "TimeoutError" &&
       /시간 초과/.test(error.message),
   );
 
+  assert.ok(receivedSignal);
   assert.equal(receivedSignal.aborted, true);
 });

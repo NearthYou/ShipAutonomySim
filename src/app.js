@@ -159,10 +159,16 @@ class ViewerController {
 
     try {
       this.manifest = await loadManifest("./manifest.json");
-      const imageCount = this.manifest.frame_count * 2;
+      const imageCount = this.manifest.frameCount * 2;
+      const preloadInput = this.manifest.frames.map((frame) => ({
+        index: frame.index,
+        time_ms: frame.timeMs,
+        colorUrl: frame.color.url,
+        depthUrl: frame.depth.url,
+      }));
       this.updateLoading({ percent: 0, label: `이미지 0 / ${imageCount} 불러오는 중` });
 
-      this.frames = await preloadFrames(this.manifest.frames, {
+      this.frames = await preloadFrames(preloadInput, {
         onProgress: ({ completed, total, percent }) => {
           this.updateLoading({ percent, label: `이미지 ${completed} / ${total} 불러오는 중` });
         },
@@ -226,7 +232,7 @@ class ViewerController {
     this.elements["frame-slider"].max = String(this.frames.length - 1);
     this.player = new SequencePlayer({
       frameCount: this.frames.length,
-      intervalMs: this.manifest.interval_ms,
+      intervalMs: this.manifest.intervalMs,
       onFrameChange: (index) => this.renderFrame(index),
       onPlayingChange: (isPlaying) => this.updatePlayingState(isPlaying),
     });
