@@ -128,6 +128,24 @@ test("HTTP 오류를 사용자가 이해할 수 있는 manifest 오류로 바꾼
   );
 });
 
+test("잘못된 JSON을 원인을 보존한 manifest 오류로 바꾼다", async () => {
+  const cause = new SyntaxError("예상하지 못한 토큰");
+  const response = {
+    ok: true,
+    status: 200,
+    url: MANIFEST_URL,
+    async json() {
+      throw cause;
+    },
+  };
+
+  await assert.rejects(
+    loadManifest("./manifest.json", async () => response),
+    (error) =>
+      error instanceof ManifestError && /JSON/.test(error.message) && error.cause === cause,
+  );
+});
+
 test("네트워크 실패 원인을 보존한다", async () => {
   const cause = new Error("연결 거부");
 
