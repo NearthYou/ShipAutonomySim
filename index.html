@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>이미지 시퀀스 뷰어</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="page-header">
+        <div>
+          <p class="eyebrow">IMAGE SEQUENCE PROJECT</p>
+          <h1>Image Sequence Viewer</h1>
+          <p class="page-description">컬러와 깊이 프레임을 같은 시간축에서 확인합니다.</p>
+        </div>
+        <div class="load-card" id="loading-panel" aria-live="polite">
+          <div class="load-card__heading">
+            <span id="loading-label">데이터를 기다리는 중</span>
+            <output id="loading-percent" for="loading-progress">0%</output>
+          </div>
+          <progress id="loading-progress" max="100" value="0">0%</progress>
+        </div>
+      </header>
+
+      <section class="error-card" id="viewer-error" role="alert" hidden>
+        <p class="error-card__label">불러오지 못했습니다</p>
+        <p id="viewer-error-message"></p>
+      </section>
+
+      <main>
+        <section class="readout-bar" aria-label="현재 재생 정보">
+          <div class="readout-item">
+            <span class="readout-label">프레임</span>
+            <output id="frame-readout">0 / 0</output>
+          </div>
+          <div class="readout-divider" aria-hidden="true"></div>
+          <div class="readout-item">
+            <span class="readout-label">경과 시간</span>
+            <output id="time-readout">00:00.000</output>
+          </div>
+          <div class="viewer-state" id="viewer-state">로딩 전</div>
+        </section>
+
+        <section class="canvas-grid" aria-label="컬러와 깊이 프레임 비교">
+          <article class="canvas-panel">
+            <header class="canvas-panel__header">
+              <div>
+                <p class="panel-index">01</p>
+                <h2>Color Frame</h2>
+              </div>
+              <span class="panel-badge">RGB</span>
+            </header>
+            <div class="canvas-stage">
+              <canvas id="color-canvas" width="640" height="360" aria-label="현재 컬러 프레임"></canvas>
+              <span class="canvas-placeholder">COLOR</span>
+            </div>
+          </article>
+
+          <article class="canvas-panel">
+            <header class="canvas-panel__header">
+              <div>
+                <p class="panel-index">02</p>
+                <h2>Depth Frame</h2>
+              </div>
+              <span class="panel-badge" id="depth-mode-badge">GRAY</span>
+            </header>
+            <div class="canvas-stage">
+              <canvas id="depth-canvas" width="640" height="360" aria-label="현재 깊이 프레임"></canvas>
+              <span class="canvas-placeholder">DEPTH</span>
+            </div>
+          </article>
+        </section>
+
+        <section class="transport" aria-label="재생 컨트롤">
+          <div class="timeline-row">
+            <label for="frame-slider">프레임 탐색</label>
+            <input id="frame-slider" data-viewer-control type="range" min="0" max="0" value="0" step="1" disabled>
+          </div>
+
+          <div class="transport-row">
+            <div class="button-group" aria-label="프레임 이동">
+              <button id="restart" data-viewer-control type="button" disabled>
+                <span aria-hidden="true">↤</span>
+                처음으로
+              </button>
+              <button id="previous-frame" data-viewer-control type="button" disabled>
+                <span aria-hidden="true">←</span>
+                이전
+              </button>
+              <button class="primary-button" id="play-toggle" data-viewer-control type="button" disabled>
+                <span id="play-icon" aria-hidden="true">▶</span>
+                <span id="play-label">재생</span>
+              </button>
+              <button id="next-frame" data-viewer-control type="button" disabled>
+                다음
+                <span aria-hidden="true">→</span>
+              </button>
+            </div>
+
+            <div class="settings-group">
+              <label for="playback-speed">재생 속도</label>
+              <select id="playback-speed" data-viewer-control disabled>
+                <option value="0.5">0.5x</option>
+                <option value="1" selected>1x</option>
+                <option value="2">2x</option>
+              </select>
+              <button id="depth-mode" data-viewer-control type="button" aria-pressed="false" disabled>
+                깊이 컬러맵 켜기
+              </button>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer class="page-footer">
+        <span>STATIC CANVAS VIEWER</span>
+        <span>MANIFEST DRIVEN</span>
+      </footer>
+    </div>
+  </body>
+</html>
