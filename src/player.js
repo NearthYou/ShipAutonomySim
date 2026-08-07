@@ -153,6 +153,8 @@ export class SequencePlayer {
       }
     }
 
-    this.scheduleNextFrame();
+    if (this.isPlaying) {
+      this.scheduleNextFrame();
+    }
   }
 }

@@ -144,6 +144,26 @@ test("마지막 프레임에 도달하면 재생을 멈춘다", () => {
   assert.deepEqual(playingChanges, [true, false]);
 });
 
+test("프레임 변경 처리 중 멈추면 다음 애니메이션 프레임을 예약하지 않는다", () => {
+  const scheduler = createScheduler();
+  let player;
+  player = new SequencePlayer({
+    frameCount: 3,
+    intervalMs: 100,
+    onFrameChange: () => player.pause(),
+    requestFrame: (callback) => scheduler.request(callback),
+    cancelFrame: (id) => scheduler.cancel(id),
+  });
+
+  player.play();
+  scheduler.run(0);
+  scheduler.run(100);
+
+  assert.equal(player.index, 1);
+  assert.equal(player.isPlaying, false);
+  assert.equal(scheduler.pendingCount, 0);
+});
+
 test("마지막 프레임에서 재생하면 처음부터 다시 시작한다", () => {
   const { player, scheduler, frameChanges } = createPlayer();
   player.seek(2);
