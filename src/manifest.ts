@@ -210,8 +210,8 @@ export async function loadManifest(
         );
       }
 
-      if (!response.ok) {
-        const status = response.status ?? "알 수 없음";
+      if (!response?.ok) {
+        const status = response?.status ?? "알 수 없음";
         throw new ManifestError(
           `manifest.json 요청에 실패했습니다. HTTP 상태: ${status}. 파일 위치를 확인하세요.`,
         );

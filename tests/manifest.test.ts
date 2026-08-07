@@ -47,6 +47,7 @@ async function withTestDeadline<T>(promise: Promise<T>, timeoutMs = 250): Promis
 
 test("manifest 위치를 기준으로 프레임 URL을 해석한다", () => {
   const manifest = validManifest();
+  const originalManifest = structuredClone(manifest);
 
   const result = validateManifest(manifest, MANIFEST_URL);
 
@@ -59,6 +60,7 @@ test("manifest 위치를 기준으로 프레임 URL을 해석한다", () => {
     "https://example.test/sequences/color_000000.png",
   );
   assert.equal(result.frames[1]?.depth.kind, "depth");
+  assert.deepEqual(manifest, originalManifest);
 });
 
 test("동일 출처의 절대 이미지 URL을 허용한다", () => {
@@ -178,6 +180,18 @@ test("HTTP 오류를 사용자가 이해할 수 있는 manifest 오류로 바꾼
     loadManifest("./manifest.json", async () => response),
     (error) => error instanceof ManifestError && /404/.test(error.message),
   );
+});
+
+test("nullish fetch 응답을 알 수 없음 상태의 manifest 오류로 바꾼다", async () => {
+  for (const response of [undefined, null]) {
+    await assert.rejects(
+      loadManifest("./manifest.json", async () => response as never),
+      (error) =>
+        error instanceof ManifestError &&
+        /알 수 없음/.test(error.message) &&
+        /파일 위치/.test(error.message),
+    );
+  }
 });
 
 test("잘못된 JSON을 원인을 보존한 manifest 오류로 바꾼다", async () => {

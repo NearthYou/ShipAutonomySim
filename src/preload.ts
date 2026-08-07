@@ -136,7 +136,7 @@ export async function preloadFrames<
   frames: readonly SequenceFrame[],
   {
     imageLoader = loadImage,
-    ImageConstructor,
+    ImageConstructor = globalThis.Image as unknown as ImageConstructor<TImage>,
     imageTimeoutMs = DEFAULT_IMAGE_TIMEOUT_MS,
     onProgress = () => {},
   }: PreloadOptions<TImage> = {},

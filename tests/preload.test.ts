@@ -36,6 +36,12 @@ class HangingImage implements LoadableImage {
   }
 }
 
+class DefaultImage extends LoadedImage {
+  constructor() {
+    super("");
+  }
+}
+
 async function withTestDeadline<T>(promise: Promise<T>, timeoutMs = 250): Promise<T> {
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -97,8 +103,37 @@ test("모든 프레임에 불러온 컬러와 깊이 이미지를 연결한다",
   assert.equal(result[0]?.color.sourcePath, "color_000000.png");
   assert.equal(result[0]?.color.image.source, "https://example.test/color_000000.png");
   assert.equal(result[0]?.depth.kind, "depth");
+  assert.equal(result[0]?.depth.image.source, "https://example.test/depth_000000.png");
+  assert.equal(result[1]?.color.image.source, "https://example.test/color_000001.png");
   assert.equal(result[1]?.depth.image.source, "https://example.test/depth_000001.png");
   assert.equal("image" in input[0].color, false);
+});
+
+test("ImageConstructor 옵션을 생략해도 사용자 정의 로더에 전역 Image를 전달한다", async (t) => {
+  const previousImage = Object.getOwnPropertyDescriptor(globalThis, "Image");
+  Object.defineProperty(globalThis, "Image", {
+    configurable: true,
+    writable: true,
+    value: DefaultImage,
+  });
+  t.after(() => {
+    if (previousImage) {
+      Object.defineProperty(globalThis, "Image", previousImage);
+    } else {
+      Reflect.deleteProperty(globalThis, "Image");
+    }
+  });
+
+  const receivedConstructors: unknown[] = [];
+
+  await preloadFrames<LoadedImage>([frames()[0]], {
+    imageLoader: async (url, ImageType) => {
+      receivedConstructors.push(ImageType);
+      return new LoadedImage(url);
+    },
+  });
+
+  assert.deepEqual(receivedConstructors, [DefaultImage, DefaultImage]);
 });
 
 test("이미지 하나가 끝날 때마다 완료 수와 백분율을 알린다", async () => {
