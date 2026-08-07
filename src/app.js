@@ -148,23 +148,23 @@ class ViewerController {
     });
 
     elements.restart.addEventListener("click", () => {
-      this.player.restart();
       this.setViewerState("일시정지");
+      this.player.restart();
     });
 
     elements["previous-frame"].addEventListener("click", () => {
-      this.player.previous();
       this.setViewerState("일시정지");
+      this.player.previous();
     });
 
     elements["next-frame"].addEventListener("click", () => {
-      this.player.next();
       this.setViewerState("일시정지");
+      this.player.next();
     });
 
     elements["frame-slider"].addEventListener("input", (event) => {
-      this.player.seek(Number(event.currentTarget.value));
       this.setViewerState("일시정지");
+      this.player.seek(Number(event.currentTarget.value));
     });
 
     elements["playback-speed"].addEventListener("change", (event) => {
