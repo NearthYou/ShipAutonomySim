@@ -1,5 +1,5 @@
 {
-  "name": "image-sequence-web-viewer",
+  "name": "image-sequence-viewer",
   "version": "1.0.0",
   "private": true,
   "type": "module",
