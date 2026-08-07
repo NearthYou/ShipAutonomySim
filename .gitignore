@@ -6,3 +6,12 @@ __pycache__/
 *.py[cod]
 /node_modules/
 /dist/
+
+# ShipAutonomySim Unreal Engine generated files
+/ShipAutonomySim/.vs/
+/ShipAutonomySim/Binaries/
+/ShipAutonomySim/DerivedDataCache/
+/ShipAutonomySim/Intermediate/
+/ShipAutonomySim/Saved/
+/ShipAutonomySim/*.sln
+/ShipAutonomySim/*.VC.db
