@@ -44,7 +44,10 @@ export class SequencePlayer {
     }
 
     if (this.index === this.frameCount - 1) {
-      this.updateIndex(0);
+      const didRender = this.updateIndex(0);
+      if (!didRender) {
+        return;
+      }
     }
 
     this.elapsedMs = 0;
@@ -113,11 +116,11 @@ export class SequencePlayer {
   updateIndex(index) {
     const nextIndex = Math.min(Math.max(index, 0), this.frameCount - 1);
     if (nextIndex === this.index) {
-      return;
+      return true;
     }
 
     this.index = nextIndex;
-    this.onFrameChange(nextIndex);
+    return this.onFrameChange(nextIndex) !== false;
   }
 
   scheduleNextFrame() {
