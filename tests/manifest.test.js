@@ -28,6 +28,23 @@ function validManifest() {
   };
 }
 
+async function withTestDeadline(promise, timeoutMs = 250) {
+  let timeoutId;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((resolve, reject) => {
+        timeoutId = setTimeout(
+          () => reject(new Error("테스트 제한 시간 안에 요청이 끝나야 합니다.")),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 test("manifest 위치를 기준으로 프레임 URL을 해석한다", () => {
   const manifest = validManifest();
 
@@ -36,6 +53,29 @@ test("manifest 위치를 기준으로 프레임 URL을 해석한다", () => {
   assert.equal(result.frames[0].colorUrl, "https://example.test/sequences/color_000000.png");
   assert.equal(result.frames[1].depthUrl, "https://example.test/sequences/depth_000001.png");
   assert.equal(manifest.frames[0].colorUrl, undefined);
+});
+
+test("동일 출처의 절대 이미지 URL을 허용한다", () => {
+  const manifest = validManifest();
+  manifest.frames[0].color = "https://example.test/sequences/color_000000.png";
+
+  const result = validateManifest(manifest, MANIFEST_URL);
+
+  assert.equal(result.frames[0].colorUrl, manifest.frames[0].color);
+});
+
+test("교차 출처 이미지 URL을 manifest 검증에서 거부한다", () => {
+  const manifest = validManifest();
+  manifest.frames[0].depth = "https://assets.example.test/depth_000000.png";
+
+  assert.throws(
+    () => validateManifest(manifest, MANIFEST_URL),
+    (error) =>
+      error instanceof ManifestError &&
+      /frames\[0\]\.depth/.test(error.message) &&
+      /동일한 출처/.test(error.message) &&
+      /상대 경로/.test(error.message),
+  );
 });
 
 test("프레임 수와 배열 길이가 다르면 거부한다", () => {
@@ -155,4 +195,60 @@ test("네트워크 실패 원인을 보존한다", async () => {
     }),
     (error) => error instanceof ManifestError && error.cause === cause,
   );
+});
+
+test("signal을 무시하는 manifest 요청도 제한 시간 뒤 중단한다", async () => {
+  let receivedSignal;
+  const neverSettles = new Promise(() => {});
+
+  await assert.rejects(
+    withTestDeadline(
+      loadManifest(
+        "./manifest.json",
+        async (url, options) => {
+          receivedSignal = options.signal;
+          return neverSettles;
+        },
+        { timeoutMs: 5 },
+      ),
+    ),
+    (error) =>
+      error instanceof ManifestError &&
+      error.cause?.name === "TimeoutError" &&
+      /시간 초과/.test(error.message),
+  );
+
+  assert.equal(receivedSignal.aborted, true);
+});
+
+test("manifest 본문 JSON 해석도 하나의 제한 시간 안에 중단한다", async () => {
+  let receivedSignal;
+  const response = {
+    ok: true,
+    status: 200,
+    url: MANIFEST_URL,
+    json() {
+      return new Promise(() => {});
+    },
+  };
+
+  await assert.rejects(
+    withTestDeadline(
+      loadManifest(
+        "./manifest.json",
+        async (url, options) => {
+          receivedSignal = options.signal;
+          return response;
+        },
+        { timeoutMs: 5 },
+      ),
+      100,
+    ),
+    (error) =>
+      error instanceof ManifestError &&
+      error.cause?.name === "TimeoutError" &&
+      /시간 초과/.test(error.message),
+  );
+
+  assert.equal(receivedSignal.aborted, true);
 });

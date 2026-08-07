@@ -1,4 +1,4 @@
-import { colorizeDepthPixels } from "./depth.js";
+import { colorizeDepthPixelsInPlace } from "./depth.js";
 import { loadManifest, ManifestError } from "./manifest.js";
 import { SequencePlayer } from "./player.js";
 import { FrameLoadError, preloadFrames } from "./preload.js";
@@ -26,6 +26,21 @@ const ELEMENT_IDS = [
   "viewer-state",
 ];
 
+const FRAME_KIND_LABELS = {
+  color: "컬러",
+  depth: "깊이",
+};
+const MAX_CAUSE_DESCRIPTION_LENGTH = 200;
+
+export class FrameRenderError extends Error {
+  constructor(frameIndex, kind, cause) {
+    super(`프레임 ${frameIndex}의 ${FRAME_KIND_LABELS[kind]} 렌더링에 실패했습니다.`, { cause });
+    this.name = "FrameRenderError";
+    this.frameIndex = frameIndex;
+    this.kind = kind;
+  }
+}
+
 export function formatElapsed(timeMs) {
   const safeTime = Math.max(0, Math.floor(Number(timeMs) || 0));
   const minutes = Math.floor(safeTime / 60_000);
@@ -44,6 +59,25 @@ function fileNameFromUrl(url) {
   }
 }
 
+function normalizeCauseDescription(cause) {
+  let description = "";
+  try {
+    if (typeof cause === "string") {
+      description = cause;
+    } else if (typeof cause?.message === "string") {
+      description = cause.message;
+    }
+  } catch {
+    return "알 수 없는 오류";
+  }
+
+  const normalized = description
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized.slice(0, MAX_CAUSE_DESCRIPTION_LENGTH) || "알 수 없는 오류";
+}
+
 export function describeViewerError(error) {
   if (error instanceof ManifestError) {
     return `${error.message} manifest.json의 내용과 로컬 서버 실행 상태를 확인하세요.`;
@@ -53,7 +87,16 @@ export function describeViewerError(error) {
     const names = error.failures.slice(0, 5).map((failure) => fileNameFromUrl(failure.url));
     const remaining = error.failures.length - names.length;
     const remainingText = remaining > 0 ? `, 그 외 ${remaining}개` : "";
-    return `프레임 이미지 ${error.failures.length}개를 불러오지 못했습니다. 실패 파일: ${names.join(", ")}${remainingText}. 파일명과 manifest.json의 경로를 확인하세요.`;
+    const timeoutText = error.failures.some((failure) => failure.cause?.name === "TimeoutError")
+      ? " 시간 초과가 계속되면 로컬 HTTP 서버 응답 상태를 확인하세요."
+      : "";
+    return `프레임 이미지 ${error.failures.length}개를 불러오지 못했습니다. 실패 파일: ${names.join(", ")}${remainingText}. 파일명과 manifest.json의 경로를 확인하세요.${timeoutText}`;
+  }
+
+  if (error instanceof FrameRenderError) {
+    const kindLabel = FRAME_KIND_LABELS[error.kind];
+    const causeDescription = normalizeCauseDescription(error.cause);
+    return `프레임 ${error.frameIndex}의 ${kindLabel} 데이터를 렌더링하지 못했습니다. 해당 ${kindLabel} 이미지 파일을 확인하거나 다시 생성하세요. 원인: ${causeDescription}.`;
   }
 
   return "뷰어를 실행하는 중 오류가 발생했습니다. 페이지를 새로고침하고 더미 데이터를 다시 생성해 보세요.";
@@ -99,7 +142,8 @@ class ViewerController {
   constructor(root) {
     this.root = root;
     this.elements = collectElements(root);
-    this.offscreenCanvas = root.createElement("canvas");
+    this.colorBufferCanvas = root.createElement("canvas");
+    this.depthBufferCanvas = root.createElement("canvas");
     this.manifest = null;
     this.frames = [];
     this.player = null;
@@ -189,14 +233,18 @@ class ViewerController {
   }
 
   renderFrame(index) {
+    let isCommitting = false;
     try {
       const frame = this.frames[index];
       if (!frame) {
         throw new Error(`프레임 ${index}을 찾을 수 없습니다.`);
       }
 
-      this.drawColorFrame(frame.colorImage);
-      this.drawDepthFrame(frame.depthImage);
+      this.prepareColorFrame(index, frame.colorImage);
+      this.prepareDepthFrame(index, frame.depthImage);
+      isCommitting = true;
+      this.commitFrame(index);
+      isCommitting = false;
       this.elements["frame-slider"].value = String(index);
       this.elements["frame-readout"].value = `${frame.index} / ${this.frames.length - 1}`;
       this.elements["frame-readout"].textContent = `${frame.index} / ${this.frames.length - 1}`;
@@ -205,41 +253,77 @@ class ViewerController {
       this.elements["time-readout"].textContent = elapsed;
       return true;
     } catch (error) {
+      if (isCommitting) {
+        this.clearVisibleCanvases();
+      }
       this.showError(error);
       return false;
     }
   }
 
-  drawColorFrame(image) {
-    const { context, width, height } = prepareCanvas(this.elements["color-canvas"], image);
-    context.clearRect(0, 0, width, height);
-    context.drawImage(image, 0, 0, width, height);
+  prepareColorFrame(frameIndex, image) {
+    try {
+      const { context, width, height } = prepareCanvas(this.colorBufferCanvas, image);
+      context.clearRect(0, 0, width, height);
+      context.drawImage(image, 0, 0, width, height);
+    } catch (cause) {
+      throw new FrameRenderError(frameIndex, "color", cause);
+    }
   }
 
-  drawDepthFrame(image) {
-    const canvas = this.elements["depth-canvas"];
-    const { context, width, height } = prepareCanvas(canvas, image);
-    context.clearRect(0, 0, width, height);
+  prepareDepthFrame(frameIndex, image) {
+    try {
+      const { context, width, height } = prepareCanvas(this.depthBufferCanvas, image);
+      context.clearRect(0, 0, width, height);
 
-    if (this.depthMode === "grayscale") {
+      if (this.depthMode === "grayscale") {
+        context.drawImage(image, 0, 0, width, height);
+        return;
+      }
+
       context.drawImage(image, 0, 0, width, height);
-      return;
+      const imageData = context.getImageData(0, 0, width, height);
+      colorizeDepthPixelsInPlace(imageData.data);
+      context.putImageData(imageData, 0, 0);
+    } catch (cause) {
+      throw new FrameRenderError(frameIndex, "depth", cause);
     }
+  }
 
-    if (this.offscreenCanvas.width !== width || this.offscreenCanvas.height !== height) {
-      this.offscreenCanvas.width = width;
-      this.offscreenCanvas.height = height;
-    }
-    const offscreenContext = this.offscreenCanvas.getContext("2d", { willReadFrequently: true });
-    if (!offscreenContext) {
-      throw new Error("깊이 프레임 변환용 캔버스를 사용할 수 없습니다.");
-    }
+  commitFrame(frameIndex) {
+    this.commitCanvas(
+      frameIndex,
+      "color",
+      this.colorBufferCanvas,
+      this.elements["color-canvas"],
+    );
+    this.commitCanvas(
+      frameIndex,
+      "depth",
+      this.depthBufferCanvas,
+      this.elements["depth-canvas"],
+    );
+  }
 
-    offscreenContext.clearRect(0, 0, width, height);
-    offscreenContext.drawImage(image, 0, 0, width, height);
-    const imageData = offscreenContext.getImageData(0, 0, width, height);
-    imageData.data.set(colorizeDepthPixels(imageData.data));
-    context.putImageData(imageData, 0, 0);
+  commitCanvas(frameIndex, kind, bufferCanvas, visibleCanvas) {
+    try {
+      const { context, width, height } = prepareCanvas(visibleCanvas, bufferCanvas);
+      context.clearRect(0, 0, width, height);
+      context.drawImage(bufferCanvas, 0, 0, width, height);
+    } catch (cause) {
+      throw new FrameRenderError(frameIndex, kind, cause);
+    }
+  }
+
+  clearVisibleCanvases() {
+    for (const canvas of [this.elements["color-canvas"], this.elements["depth-canvas"]]) {
+      try {
+        const context = canvas.getContext("2d", { alpha: false });
+        context?.clearRect(0, 0, canvas.width, canvas.height);
+      } catch {
+        // 오류 상태에서는 두 출력을 비우기 위한 최선의 시도만 수행합니다.
+      }
+    }
   }
 
   updateLoading({ percent, label }) {

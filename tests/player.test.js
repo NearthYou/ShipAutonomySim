@@ -177,6 +177,37 @@ test("마지막 프레임에서 재생하면 처음부터 다시 시작한다", 
   assert.deepEqual(frameChanges, [0]);
 });
 
+test("마지막 프레임의 초기 렌더가 실패하면 오류 상태로 정지한다", () => {
+  const scheduler = createScheduler();
+  const playingChanges = [];
+  let viewerState = "준비됨";
+  const player = new SequencePlayer({
+    frameCount: 3,
+    intervalMs: 100,
+    onFrameChange: (index) => {
+      if (index === 0) {
+        viewerState = "오류";
+        return false;
+      }
+      return true;
+    },
+    onPlayingChange: (isPlaying) => {
+      playingChanges.push(isPlaying);
+      viewerState = isPlaying ? "재생 중" : "일시정지";
+    },
+    requestFrame: (callback) => scheduler.request(callback),
+    cancelFrame: (id) => scheduler.cancel(id),
+  });
+  player.seek(2);
+
+  player.play();
+
+  assert.equal(player.isPlaying, false);
+  assert.equal(scheduler.pendingCount, 0);
+  assert.deepEqual(playingChanges, []);
+  assert.equal(viewerState, "오류");
+});
+
 test("일시정지하면 예약 프레임을 취소하고 재개 시간을 초기화한다", () => {
   const { player, scheduler } = createPlayer();
 

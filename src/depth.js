@@ -40,16 +40,18 @@ export function mapDepthIntensity(value) {
 }
 
 export function colorizeDepthPixels(pixels) {
+  return colorizeDepthPixelsInPlace(new Uint8ClampedArray(pixels));
+}
+
+export function colorizeDepthPixelsInPlace(pixels) {
   if (pixels.length % 4 !== 0) {
     throw new RangeError("깊이 픽셀 데이터는 RGBA 네 채널 단위여야 합니다.");
   }
 
-  const result = new Uint8ClampedArray(pixels);
-
   for (let offset = 0; offset < pixels.length; offset += 4) {
     const intensity = (pixels[offset] + pixels[offset + 1] + pixels[offset + 2]) / 3;
-    writeDepthColor(intensity, result, offset);
+    writeDepthColor(intensity, pixels, offset);
   }
 
-  return result;
+  return pixels;
 }

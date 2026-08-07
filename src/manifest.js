@@ -5,6 +5,8 @@ export class ManifestError extends Error {
   }
 }
 
+const DEFAULT_MANIFEST_TIMEOUT_MS = 10_000;
+
 function requireRecord(value, field) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new ManifestError(`${field}은 객체여야 합니다.`);
@@ -40,11 +42,22 @@ function requireNonEmptyString(value, field) {
 }
 
 function resolveFrameUrl(path, manifestUrl, field) {
+  let resolvedUrl;
+  let resolvedManifestUrl;
   try {
-    return new URL(path, manifestUrl).href;
+    resolvedUrl = new URL(path, manifestUrl);
+    resolvedManifestUrl = new URL(manifestUrl);
   } catch (cause) {
     throw new ManifestError(`${field} 경로를 해석할 수 없습니다.`, { cause });
   }
+
+  if (resolvedUrl.origin !== resolvedManifestUrl.origin) {
+    throw new ManifestError(
+      `${field}는 manifest.json과 동일한 출처여야 합니다. manifest 기준 상대 경로 또는 같은 출처의 절대 URL을 사용하세요.`,
+    );
+  }
+
+  return resolvedUrl.href;
 }
 
 export function validateManifest(value, manifestUrl) {
@@ -102,32 +115,66 @@ export function validateManifest(value, manifestUrl) {
   };
 }
 
-export async function loadManifest(url = "./manifest.json", fetchImpl = globalThis.fetch) {
-  let response;
+export async function loadManifest(
+  url = "./manifest.json",
+  fetchImpl = globalThis.fetch,
+  { timeoutMs = DEFAULT_MANIFEST_TIMEOUT_MS } = {},
+) {
+  const controller = new AbortController();
+  let timeoutId;
+  const timeout = new Promise((resolve, reject) => {
+    timeoutId = setTimeout(() => {
+      const cause = new Error(`manifest 요청이 ${timeoutMs}ms 안에 끝나지 않았습니다.`);
+      cause.name = "TimeoutError";
+      reject(cause);
+      controller.abort(cause);
+    }, timeoutMs);
+  });
+  const request = Promise.resolve().then(async () => {
+    let response;
+    try {
+      response = await fetchImpl(url, { cache: "no-store", signal: controller.signal });
+    } catch (cause) {
+      throw new ManifestError(
+        "manifest.json을 가져오지 못했습니다. 로컬 HTTP 서버와 파일 위치를 확인하세요.",
+        { cause },
+      );
+    }
 
+    if (!response?.ok) {
+      const status = response?.status ?? "알 수 없음";
+      throw new ManifestError(
+        `manifest.json 요청에 실패했습니다. HTTP 상태: ${status}. 파일 위치를 확인하세요.`,
+      );
+    }
+
+    let value;
+    try {
+      value = await response.json();
+    } catch (cause) {
+      throw new ManifestError("manifest.json이 올바른 JSON 형식이 아닙니다.", { cause });
+    }
+
+    return { response, value };
+  });
+
+  let result;
   try {
-    response = await fetchImpl(url, { cache: "no-store" });
+    result = await Promise.race([request, timeout]);
   } catch (cause) {
-    throw new ManifestError(
-      "manifest.json을 가져오지 못했습니다. 로컬 HTTP 서버와 파일 위치를 확인하세요.",
-      { cause },
-    );
+    if (cause?.name === "TimeoutError") {
+      throw new ManifestError(
+        `manifest.json 요청이 ${timeoutMs}ms 후 시간 초과되었습니다. 파일 경로와 로컬 HTTP 서버 응답 상태를 확인하세요.`,
+        { cause },
+      );
+    }
+
+    throw cause;
+  } finally {
+    clearTimeout(timeoutId);
   }
 
-  if (!response?.ok) {
-    const status = response?.status ?? "알 수 없음";
-    throw new ManifestError(
-      `manifest.json 요청에 실패했습니다. HTTP 상태: ${status}. 파일 위치를 확인하세요.`,
-    );
-  }
-
-  let value;
-  try {
-    value = await response.json();
-  } catch (cause) {
-    throw new ManifestError("manifest.json이 올바른 JSON 형식이 아닙니다.", { cause });
-  }
-
+  const { response, value } = result;
   const baseUrl = response.url || new URL(url, globalThis.location?.href ?? "http://localhost/").href;
   return validateManifest(value, baseUrl);
 }
