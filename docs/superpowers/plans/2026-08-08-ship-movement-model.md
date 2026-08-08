@@ -209,7 +209,7 @@ FShipSurfaceBasis BuildShipSurfaceBasis(
 | 편집 범위, 평형 속도, Euler 안정성, snapshot 전체 fallback | Task 1, Task 3 | Motion.ParameterValidation, runtime debug |
 | Water 파도 및 무파도, exclusion, invalid, component fallback | Task 2, Task 3 | Water.Classification, PIE water 상태 |
 | 경사 수면에서 world XY yaw를 보존하는 직교기저 | Task 2, Task 3 | Water.SurfaceBasis, PIE 횡경사 |
-| UShipMovement만 swept transform 변경, blocking hit speed 0 | Task 3 | Runtime.FallbackAndBlockingHit, 전체 runtime mutator denylist와 exact whitelist |
+| UShipMovement만 swept transform 변경, blocking hit speed 0 | Task 3 | Runtime.FallbackAndBlockingHit, 전체 runtime mutator denylist, Task 3의 ShipPawn child mutator 기대값 0과 Task 4 RED의 기대값 1 전환 |
 | 200 x 100 x 100 hull, 물리 비활성화, 3인칭 카메라 | Task 4 | Pawn.Construction, PIE |
 | runtime Enhanced Input WASD, UObject 수명, 양쪽 키 상쇄 | Task 4 | Pawn.InputLifecycle, PIE |
 | Completed, Canceled, focus loss, UnPossessed, EndPlay reset | Task 4 | 즉시 mapping rebuild, W/A 비영 입력 선행 단언, FlushPressedKeys automation, OS focus PIE |
@@ -787,7 +787,7 @@ Task 2 파일의 마지막 closing `#endif`를 아래 두 macro, include, fixtur
 
 FallbackAndBlockingHit는 physics scene을 만든 transient UWorld에 box-root AActor와 UShipMovement를 등록한다. Water가 없는 상태에서 Z를 유지하며 X가 증가하는지 확인하고, WorldStatic box 앞에서 sweep 후 penetration 없이 speed 0과 남은 substep 중단을 확인한다.
 
-TransformOwnership은 `Source/ShipAutonomySim` 아래 runtime h와 cpp 전체를 재귀 검사하고 `Private/Tests`만 제외한다. actor 이동, teleport, actor local 및 world offset, scene component world 및 relative transform, MoveComponent 계열을 denylist로 검사한다. runtime 이동 whitelist는 ShipMovement.cpp의 swept `Owner->SetActorLocationAndRotation(NewLocation, NewRotation, true, &Hit, ETeleportType::None)` 한 문장뿐이다. actor/root 이동이 아닌 ShipPawn.cpp의 고정 child mesh scale과 camera boom 초기 pitch 두 문장은 각각 정확한 source line 한 건만 별도 whitelist한다. 다른 파일, 다른 receiver, 다른 인수 또는 추가 발생은 실패한다.
+TransformOwnership은 `Source/ShipAutonomySim` 아래 runtime h와 cpp 전체를 재귀 검사하고 `Private/Tests`만 제외한다. actor 이동, teleport, actor local 및 world offset, scene component world 및 relative transform, MoveComponent 계열을 denylist로 검사한다. runtime 이동 whitelist는 ShipMovement.cpp의 swept `Owner->SetActorLocationAndRotation(NewLocation, NewRotation, true, &Hit, ETeleportType::None)` 한 문장뿐이다. ShipPawn.cpp의 고정 child mesh scale과 camera boom 초기 pitch는 Task 4 산출물이므로 Task 3에서는 두 exact line의 `ExpectedCount`를 각각 0으로 둔다. Task 3에 두 문장이 미리 나타나거나 다른 파일, receiver, 인수 또는 추가 발생이 있으면 실패한다. Task 4 RED에서 두 기대값만 1로 전환한다.
 
 ~~~cpp
 #include "Components/BoxComponent.h"
@@ -908,9 +908,9 @@ bool FShipTransformOwnershipTest::RunTest(const FString&)
         {TEXT("/Private/ShipMovement.cpp"),
          TEXT("Owner->SetActorLocationAndRotation("), 1},
         {TEXT("/Private/ShipPawn.cpp"),
-         TEXT("VisualMesh->SetRelativeScale3D(FVector(2.0,1.0,1.0));"), 1},
+         TEXT("VisualMesh->SetRelativeScale3D(FVector(2.0,1.0,1.0));"), 0},
         {TEXT("/Private/ShipPawn.cpp"),
-         TEXT("CameraBoom->SetRelativeRotation(FRotator(CameraPitchDegrees,0.0,0.0));"), 1}
+         TEXT("CameraBoom->SetRelativeRotation(FRotator(CameraPitchDegrees,0.0,0.0));"), 0}
     };
     const auto Compact = [](FString Value)
     {
@@ -983,6 +983,8 @@ bool FShipTransformOwnershipTest::RunTest(const FString&)
 }
 ~~~
 
+Task 3의 단계별 ownership count는 swept actor move 1, ShipPawn mesh scale 0, ShipPawn camera rotation 0이다. 따라서 Task 3 GREEN은 Task 4의 child setup 문장을 미리 요구하지 않는다.
+
 FallbackAndBlockingHit RunTest는 ship root를 ECC_Pawn QueryOnly, blocker root를 ECC_WorldStatic QueryOnly로 설정하고 서로 block하도록 만든다.
 
 ~~~cpp
@@ -1023,7 +1025,7 @@ TestEqual(TEXT("invalid tick draws debug exactly once"),
 Invoke-ExpectedRedBuild -Stage "Task3" -ExpectedTests 8 -ExpectedFailurePattern 'UShipMovement|SetThrottle|SetSteer|TickComponent|SetActorLocationAndRotation'
 ~~~
 
-Expected: UShipMovement의 새 setter, TickComponent 또는 승인된 swept call 부재로 compile 또는 test 계약이 실패하고 editor는 실행하지 않는다.
+Expected: UShipMovement의 새 setter, TickComponent 또는 승인된 swept call 부재로 compile 또는 test 계약이 실패하고 editor는 실행하지 않는다. 이 RED 시점의 TransformOwnership 기대값은 swept actor move 1, ShipPawn mesh scale 0, ShipPawn camera rotation 0이다.
 
 - [ ] **Step 3: UShipMovement public header 구현**
 
@@ -1414,7 +1416,7 @@ void UShipMovement::DrawMovementDebug() const
 Invoke-ShipGreenGate -ExpectedTests 8 -Stage "Task3"
 ~~~
 
-Expected: guard opening 및 closing 각 1개와 macro 8개를 먼저 확인하고, build exit 0 뒤 발견 8, Success 8, failure 및 automation error 0, clean exit marker 1개 이상이다. Runtime test는 fallback, invalid 입력과 blocking hit tick에서 debug call 증가가 각각 정확히 1이고, sweep 위치 유지, speed 0과 remaining substep 중단을 단언한다.
+Expected: guard opening 및 closing 각 1개와 macro 8개를 먼저 확인하고, build exit 0 뒤 발견 8, Success 8, failure 및 automation error 0, clean exit marker 1개 이상이다. TransformOwnership의 actual count는 swept actor move 1, ShipPawn mesh scale 0, ShipPawn camera rotation 0과 일치한다. Runtime test는 fallback, invalid 입력과 blocking hit tick에서 debug call 증가가 각각 정확히 1이고, sweep 위치 유지, speed 0과 remaining substep 중단을 단언한다.
 
 - [ ] **Step 8: Task 3 commit**
 
@@ -1443,7 +1445,16 @@ git commit -m "feat: 선박 이동 컴포넌트 완성" -m "변경 이유: 수�
 
 - [ ] **Step 1: 실제 LocalPlayer 입력 fixture와 Pawn RED test 세 개 추가**
 
-Task 3 파일의 마지막 closing `#endif`를 세 Pawn macro, include, fixture, accessor와 세 RunTest 본문 뒤로 옮긴다. 아래 C++ block들은 같은 outer guard 안에 이어 붙이고 Step 2 전에 closing을 파일 마지막 줄에 복원한다. Construction은 root extent 100,50,50, visual scale 2,1,1, collision과 physics off, movement, spring arm과 camera 존재를 단언한다. 나머지 두 test는 private handler를 직접 호출하지 않는다. UE 5.5.4의 정상 경로대로 GameInstance에 LocalPlayer를 등록하고, project GameMode로 world actor를 초기화하고, `ULocalPlayer::SpawnPlayActor`가 만든 local APlayerController와 실제 `UEnhancedInputLocalPlayerSubsystem`, `UEnhancedPlayerInput`, `UEnhancedInputComponent`를 사용한다. 키 입력은 `APlayerController::InputKey(FInputKeyParams(...))` 뒤 `PlayerTick`으로 처리한다.
+Task 3 파일의 마지막 closing `#endif`를 세 Pawn macro, include, fixture, accessor와 세 RunTest 본문 뒤로 옮긴다. 아래 C++ block들은 같은 outer guard 안에 이어 붙이고 Step 2 전에 closing을 파일 마지막 줄에 복원한다. 같은 RED 편집에서 기존 TransformOwnership의 ShipPawn child 두 항목만 아래 값으로 교체해 `ExpectedCount`를 0에서 1로 전환한다. ShipMovement.cpp의 swept actor move 기대값 1은 바꾸지 않는다. Construction은 root extent 100,50,50, visual scale 2,1,1, collision과 physics off, movement, spring arm과 camera 존재를 단언한다. 나머지 두 test는 private handler를 직접 호출하지 않는다. UE 5.5.4의 정상 경로대로 GameInstance에 LocalPlayer를 등록하고, project GameMode로 world actor를 초기화하고, `ULocalPlayer::SpawnPlayActor`가 만든 local APlayerController와 실제 `UEnhancedInputLocalPlayerSubsystem`, `UEnhancedPlayerInput`, `UEnhancedInputComponent`를 사용한다. 키 입력은 `APlayerController::InputKey(FInputKeyParams(...))` 뒤 `PlayerTick`으로 처리한다.
+
+~~~cpp
+{TEXT("/Private/ShipPawn.cpp"),
+ TEXT("VisualMesh->SetRelativeScale3D(FVector(2.0,1.0,1.0));"), 1},
+{TEXT("/Private/ShipPawn.cpp"),
+ TEXT("CameraBoom->SetRelativeRotation(FRotator(CameraPitchDegrees,0.0,0.0));"), 1}
+~~~
+
+이 교체 뒤 Task 4 RED와 이후 파일의 ownership count 계약은 swept actor move 1, ShipPawn mesh scale 1, ShipPawn camera rotation 1이다.
 
 ~~~cpp
 #include "Engine/Engine.h"
@@ -1737,7 +1748,7 @@ bool FShipPawnFocusLossTest::RunTest(const FString&)
 Invoke-ExpectedRedBuild -Stage "Task4" -ExpectedTests 11 -ExpectedFailurePattern 'AShipPawn|ManualControlMapping|TestManualMappingRemovalCount|DefaultInput|UEnhancedInput'
 ~~~
 
-Expected: AShipPawn의 component, 실제 input lifecycle seam 또는 DefaultInput 계약 부재로 build가 실패하고 editor는 실행하지 않는다.
+Expected: AShipPawn의 component, 실제 input lifecycle seam 또는 DefaultInput 계약 부재로 build가 실패하고 editor는 실행하지 않는다. RED test source의 TransformOwnership 기대값은 1, 1, 1로 전환됐지만 두 ShipPawn child 문장은 아직 제품 source에 없으므로 Task 4 구현 전에는 GREEN이 될 수 없다.
 
 - [ ] **Step 3: Pawn header의 소유권과 lifecycle 선언**
 
@@ -2060,7 +2071,7 @@ bShouldFlushPressedKeysOnViewportFocusLost=True
 Invoke-ShipGreenGate -ExpectedTests 11 -Stage "Task4"
 ~~~
 
-Expected: guard opening 및 closing 각 1개와 macro 11개를 먼저 확인하고, build exit 0 뒤 발견 11, Success 11, failure 및 automation error 0, clean exit marker 1개 이상이다. Pawn tests는 즉시 mapping rebuild 뒤 W throttle과 A steer가 비영 값임을 먼저 증명하고, 실제 Triggered, Completed, Canceled, UnPossessed, EndPlay, mapping 제거 횟수 1, controller pressed-key flush 뒤 drag-only step과 늦은 release 뒤 autopilot 입력 보존을 단언한다. OS focus 전환 자체는 PIE에서 보완 검증한다.
+Expected: guard opening 및 closing 각 1개와 macro 11개를 먼저 확인하고, build exit 0 뒤 발견 11, Success 11, failure 및 automation error 0, clean exit marker 1개 이상이다. TransformOwnership의 actual count는 swept actor move 1, ShipPawn mesh scale 1, ShipPawn camera rotation 1과 일치한다. Pawn tests는 즉시 mapping rebuild 뒤 W throttle과 A steer가 비영 값임을 먼저 증명하고, 실제 Triggered, Completed, Canceled, UnPossessed, EndPlay, mapping 제거 횟수 1, controller pressed-key flush 뒤 drag-only step과 늦은 release 뒤 autopilot 입력 보존을 단언한다. OS focus 전환 자체는 PIE에서 보완 검증한다.
 
 - [ ] **Step 9: Task 4 commit**
 
@@ -2500,7 +2511,7 @@ Expected: 제품 변경은 File Structure의 생성 및 수정 목록만 포함�
 - [x] LocalPlayer, 실제 Enhanced subsystem과 component, InputKey, PlayerTick, FlushPressedKeys, UnPossessed와 EndPlay 경로를 test code로 고정함
 - [x] `bForceImmediately=true`인 RequestRebuildControlMappings를 첫 InputKey 전에 호출하고 W/A가 비영 값을 만든 뒤에만 flush 결과를 검사함
 - [x] Completed와 Canceled release handler 모두 manual-active guard를 거치며 늦은 event 뒤 autopilot setter 값 보존을 단언함
-- [x] runtime source 전체 transform mutator denylist와 swept actor move 및 고정 child setup의 exact whitelist를 고정함
+- [x] runtime source 전체 transform mutator denylist를 유지하고 Task 3의 ownership count 1, 0, 0을 Task 4 RED에서 1, 1, 1로 전환해 미래 child setup을 앞선 GREEN이 요구하지 않도록 고정함
 - [x] 정상, Water fallback과 오류 tick 모두 scope-exit에서 debug를 frame당 정확히 한 번 호출함
 - [x] 모든 GREEN gate가 build exit 뒤 발견 수, Success 수, failure/error 0과 clean exit를 강제함
 - [x] final build는 project 내부 ignored UBT 산출물만 -Clean한 뒤 compile 및 link action을 강제함
@@ -2508,4 +2519,4 @@ Expected: 제품 변경은 File Structure의 생성 및 수정 목록만 포함�
 - [x] 4단계 Navigator, 코스와 벽 및 5단계 Capture가 구현 Task에 없음을 확인함
 - [x] 외부 의존성, 에셋, 새 모듈이 없음을 확인함
 - [x] 예상 밖 tracked change를 복구하지 않는 No-Go와 no-write MainLevel 명령을 포함함
-- [x] 미정 표현, 타입 및 시그니처, 파일 경로, code fence, Task 선후관계와 3단계 범위를 다시 검사함
+- [x] 미정 표현, 타입 및 시그니처, 파일 경로, code fence, Task 선후관계와 3단계 범위를 다시 검사하고 다른 미래 Task 산출물을 앞선 GREEN이 요구하지 않음을 확인함
