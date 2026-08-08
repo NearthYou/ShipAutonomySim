@@ -1,8 +1,19 @@
 #if WITH_DEV_AUTOMATION_TESTS
 #include <limits>
 
+#include "Components/BoxComponent.h"
+#include "Engine/World.h"
+#include "GameFramework/Actor.h"
+#include "GameFramework/PlayerController.h"
+#include "HAL/FileManager.h"
+#include "Kismet/GameplayStatics.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "ShipMovement.h"
 #include "ShipMovementSimulation.h"
+#include "ShipPawn.h"
+#include "SimGameMode.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     FShipMotionDynamicsTest,
@@ -543,6 +554,266 @@ bool FShipSurfaceBasisTest::RunTest(const FString&)
         FMath::IsFinite(NonFiniteFallback.Up.Y) &&
         FMath::IsFinite(NonFiniteFallback.Up.Z));
     TestBasis(TEXT("non-finite normal fallback"), 75.0, NonFiniteFallback);
+
+    return !HasAnyErrors();
+}
+
+class FScopedShipTestWorld
+{
+public:
+    FScopedShipTestWorld()
+    {
+        World = UWorld::CreateWorld(EWorldType::Game, false);
+        check(World != nullptr && World->GetPhysicsScene() != nullptr);
+    }
+
+    ~FScopedShipTestWorld()
+    {
+        World->DestroyWorld(false);
+    }
+
+    UWorld* World = nullptr;
+};
+
+struct FShipMovementTestAccessor
+{
+    static void BeginPlay(UShipMovement& Movement) { Movement.BeginPlay(); }
+    static void SetState(UShipMovement& Movement, double Speed, double Yaw)
+    {
+        Movement.SignedSpeedCmPerSecond = Speed;
+        Movement.HorizontalYawDegrees = Yaw;
+    }
+    static void Tick(UShipMovement& Movement, float DeltaTime)
+    {
+        Movement.TickComponent(DeltaTime, LEVELTICK_All, nullptr);
+    }
+    static double Speed(const UShipMovement& Movement)
+    {
+        return Movement.SignedSpeedCmPerSecond;
+    }
+    static double Throttle(const UShipMovement& Movement)
+    {
+        return Movement.ThrottleInput;
+    }
+    static double Steer(const UShipMovement& Movement)
+    {
+        return Movement.SteerInput;
+    }
+    static double Acceleration(const UShipMovement& Movement)
+    {
+        return Movement.LastAcceleration;
+    }
+    static bool BlockingHit(const UShipMovement& Movement)
+    {
+        return Movement.bLastBlockingHit;
+    }
+    static int32 DebugDrawCalls(const UShipMovement& Movement)
+    {
+        return Movement.TestDebugDrawInvocationCount;
+    }
+};
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipMovementRuntimeTest,
+    "ShipAutonomySim.ShipMovement.Runtime.FallbackAndBlockingHit",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipTransformOwnershipTest,
+    "ShipAutonomySim.ShipMovement.Runtime.TransformOwnership",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FShipTransformOwnershipTest::RunTest(const FString&)
+{
+    const FString RuntimeRoot = FPaths::ConvertRelativePathToFull(
+        FPaths::ProjectDir() / TEXT("Source/ShipAutonomySim"));
+    TArray<FString> Files;
+    IFileManager::Get().FindFilesRecursive(
+        Files, *RuntimeRoot, TEXT("*.h"), true, false);
+    IFileManager::Get().FindFilesRecursive(
+        Files, *RuntimeRoot, TEXT("*.cpp"), true, false);
+
+    const TArray<FString> DeniedMutators = {
+        TEXT("SetActorTransform("), TEXT("SetActorLocation("),
+        TEXT("SetActorRotation("), TEXT("SetActorLocationAndRotation("),
+        TEXT("SetActorScale3D("), TEXT("TeleportTo("),
+        TEXT("AddActorWorldOffset("),
+        TEXT("AddActorLocalOffset("), TEXT("AddActorWorldRotation("),
+        TEXT("AddActorLocalRotation("), TEXT("AddActorWorldTransform("),
+        TEXT("AddActorLocalTransform("), TEXT("SetWorldTransform("),
+        TEXT("SetWorldLocation("), TEXT("SetWorldRotation("),
+        TEXT("SetWorldLocationAndRotation("), TEXT("SetWorldScale3D("),
+        TEXT("AddWorldOffset("),
+        TEXT("AddLocalOffset("), TEXT("AddWorldRotation("),
+        TEXT("AddLocalRotation("), TEXT("AddWorldTransform("),
+        TEXT("AddLocalTransform("), TEXT("MoveComponent("),
+        TEXT("MoveComponentImpl("), TEXT("SetRelativeTransform("),
+        TEXT("SetRelativeLocation("), TEXT("SetRelativeRotation("),
+        TEXT("SetRelativeLocationAndRotation("), TEXT("SetRelativeScale3D("),
+        TEXT("AddRelativeLocation("), TEXT("AddRelativeRotation("),
+        TEXT("AddRelativeTransform("), TEXT("K2_SetWorldLocation("),
+        TEXT("K2_SetWorldRotation("), TEXT("K2_SetWorldTransform("),
+        TEXT("K2_AddWorldOffset("), TEXT("K2_AddLocalOffset("),
+        TEXT("K2_AddWorldRotation("), TEXT("K2_AddLocalRotation(")
+    };
+    struct FAllowedLine
+    {
+        FString FileSuffix;
+        FString CompactLine;
+        int32 ExpectedCount;
+        int32 ActualCount = 0;
+    };
+    TArray<FAllowedLine> Allowed = {
+        {TEXT("/Private/ShipMovement.cpp"),
+         TEXT("Owner->SetActorLocationAndRotation("), 1},
+        {TEXT("/Private/ShipPawn.cpp"),
+         TEXT("VisualMesh->SetRelativeScale3D(FVector(2.0,1.0,1.0));"), 0},
+        {TEXT("/Private/ShipPawn.cpp"),
+         TEXT("CameraBoom->SetRelativeRotation(FRotator(CameraPitchDegrees,0.0,0.0));"), 0}
+    };
+    const auto Compact = [](FString Value)
+    {
+        Value.ReplaceInline(TEXT(" "), TEXT(""));
+        Value.ReplaceInline(TEXT("\t"), TEXT(""));
+        Value.ReplaceInline(TEXT("\r"), TEXT(""));
+        Value.ReplaceInline(TEXT("\n"), TEXT(""));
+        return Value;
+    };
+
+    FString ShipMovementSource;
+    for (const FString& File : Files)
+    {
+        FString NormalizedFile = File;
+        NormalizedFile.ReplaceInline(TEXT("\\"), TEXT("/"));
+        if (NormalizedFile.Contains(TEXT("/Private/Tests/")))
+        {
+            continue;
+        }
+        FString Source;
+        if (!TestTrue(*FString::Printf(TEXT("read %s"), *NormalizedFile),
+            FFileHelper::LoadFileToString(Source, *File)))
+        {
+            continue;
+        }
+        if (NormalizedFile.EndsWith(TEXT("/Private/ShipMovement.cpp")))
+        {
+            ShipMovementSource = Source;
+        }
+        TArray<FString> Lines;
+        Source.ParseIntoArrayLines(Lines, false);
+        for (int32 LineIndex = 0; LineIndex < Lines.Num(); ++LineIndex)
+        {
+            const FString CompactLine = Compact(Lines[LineIndex]);
+            for (const FString& Mutator : DeniedMutators)
+            {
+                if (!CompactLine.Contains(Mutator))
+                {
+                    continue;
+                }
+                bool bAllowed = false;
+                for (FAllowedLine& Entry : Allowed)
+                {
+                    if (NormalizedFile.EndsWith(Entry.FileSuffix) &&
+                        CompactLine == Entry.CompactLine)
+                    {
+                        ++Entry.ActualCount;
+                        bAllowed = true;
+                        break;
+                    }
+                }
+                if (!bAllowed)
+                {
+                    AddError(FString::Printf(
+                        TEXT("transform mutator denied: %s:%d: %s"),
+                        *NormalizedFile, LineIndex + 1, *Lines[LineIndex]));
+                }
+                break;
+            }
+        }
+    }
+    for (const FAllowedLine& Entry : Allowed)
+    {
+        TestEqual(
+            *FString::Printf(TEXT("whitelist count %s"), *Entry.CompactLine),
+            Entry.ActualCount,
+            Entry.ExpectedCount);
+    }
+    TestTrue(TEXT("only approved swept actor move statement"),
+        Compact(ShipMovementSource).Contains(
+            TEXT("Owner->SetActorLocationAndRotation(NewLocation,NewRotation,true,&Hit,ETeleportType::None);")));
+    return !HasAnyErrors();
+}
+
+bool FShipMovementRuntimeTest::RunTest(const FString&)
+{
+    FScopedShipTestWorld TestWorld;
+
+    AActor* Ship = TestWorld.World->SpawnActor<AActor>();
+    TestNotNull(TEXT("ship spawned"), Ship);
+    if (!Ship)
+    {
+        return false;
+    }
+
+    UBoxComponent* ShipRoot = NewObject<UBoxComponent>(Ship);
+    Ship->SetRootComponent(ShipRoot);
+    Ship->AddInstanceComponent(ShipRoot);
+    ShipRoot->SetBoxExtent(FVector(10.0));
+    ShipRoot->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+    ShipRoot->SetCollisionObjectType(ECC_Pawn);
+    ShipRoot->SetCollisionResponseToAllChannels(ECR_Ignore);
+    ShipRoot->SetCollisionResponseToChannel(ECC_WorldStatic, ECR_Block);
+    ShipRoot->RegisterComponent();
+
+    UShipMovement* Movement = NewObject<UShipMovement>(Ship);
+    Ship->AddInstanceComponent(Movement);
+    Movement->RegisterComponent();
+    FShipMovementTestAccessor::BeginPlay(*Movement);
+
+    AActor* Blocker = TestWorld.World->SpawnActor<AActor>();
+    TestNotNull(TEXT("blocker spawned"), Blocker);
+    if (!Blocker)
+    {
+        return false;
+    }
+
+    UBoxComponent* BlockerRoot = NewObject<UBoxComponent>(Blocker);
+    Blocker->SetRootComponent(BlockerRoot);
+    Blocker->AddInstanceComponent(BlockerRoot);
+    BlockerRoot->SetBoxExtent(FVector(10.0));
+    BlockerRoot->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+    BlockerRoot->SetCollisionObjectType(ECC_WorldStatic);
+    BlockerRoot->SetCollisionResponseToAllChannels(ECR_Ignore);
+    BlockerRoot->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
+    BlockerRoot->RegisterComponent();
+
+    FShipMovementTestAccessor::SetState(*Movement, 120.0, 0.0);
+    const double StartZ = Ship->GetActorLocation().Z;
+    Blocker->SetActorLocation(FVector(1000.0, 0.0, StartZ));
+    FShipMovementTestAccessor::Tick(*Movement, 1.0f / 120.0f);
+    TestTrue(
+        TEXT("fallback moves horizontally"), Ship->GetActorLocation().X > 0.0);
+    TestTrue(TEXT("fallback preserves Z"),
+        FMath::Abs(Ship->GetActorLocation().Z - StartZ) <= 1e-6);
+    TestEqual(TEXT("fallback tick draws debug exactly once"),
+        FShipMovementTestAccessor::DebugDrawCalls(*Movement), 1);
+
+    Ship->SetActorLocation(FVector(0.0, 0.0, StartZ));
+    Blocker->SetActorLocation(FVector(25.0, 0.0, StartZ));
+    FShipMovementTestAccessor::SetState(*Movement, 200.0, 0.0);
+    FShipMovementTestAccessor::Tick(*Movement, 1.0f / 15.0f);
+    TestTrue(TEXT("blocking hit recorded"),
+        FShipMovementTestAccessor::BlockingHit(*Movement));
+    TestEqual(TEXT("blocking hit stops speed"),
+        FShipMovementTestAccessor::Speed(*Movement), 0.0);
+    TestTrue(
+        TEXT("sweep prevents penetration"), Ship->GetActorLocation().X <= 5.01);
+    const int32 BeforeInvalid =
+        FShipMovementTestAccessor::DebugDrawCalls(*Movement);
+    FShipMovementTestAccessor::Tick(
+        *Movement, std::numeric_limits<float>::quiet_NaN());
+    TestEqual(TEXT("invalid tick draws debug exactly once"),
+        FShipMovementTestAccessor::DebugDrawCalls(*Movement), BeforeInvalid + 1);
 
     return !HasAnyErrors();
 }
