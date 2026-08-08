@@ -122,4 +122,4 @@ manifest 내용이 잘못되었다는 메시지가 보이면 화면에 표시된
 - `scripts/generate_dummy_data.py`: 표준 라이브러리 더미 데이터 생성기
 - `tests/`: TypeScript와 Python 자동 검사
 
-이 저장소는 정적 이미지 시퀀스 웹 뷰어만 다룹니다.
+이 저장소에는 정적 이미지 시퀀스 웹 뷰어와 별도의 Unreal Engine 5.5.4 과제 경로인 `ShipAutonomySim`이 함께 있습니다. Unreal 과제는 `/Game/Maps/MainLevel`과 Stage 3 수동 선박 이동이 준비된 상태이며, 코스 생성과 자율주행을 연결하는 Stage 4가 이번 구현 범위입니다.
