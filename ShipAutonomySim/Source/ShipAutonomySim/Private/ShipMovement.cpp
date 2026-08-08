@@ -405,7 +405,7 @@ void UShipMovement::DrawMovementDebug() const
     }
 
     const FString Message = FString::Printf(
-        TEXT("Ship Manual  T %.2f  S %.2f\n")
+        TEXT("Ship Auto  T %.2f  S %.2f\n")
         TEXT("speed %.3f cm/s  accel %.3f cm/s^2  yawRate %.3f deg/s\n")
         TEXT("substeps %d  h %.6f  simulated %.6f  dropped %.6f\n")
         TEXT("water %s  fallback %s  targetZ %.3f  appliedZ %.3f  offset %.3f\n")
