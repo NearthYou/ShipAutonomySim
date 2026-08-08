@@ -62,10 +62,13 @@
 - Actor.h: bool SetActorLocationAndRotation(FVector, const FQuat&, bool, FHitResult*, ETeleportType). bSweep가 true일 때 root component만 sweep한다.
 - RotationMatrix.h와 Matrix.h: FRotationMatrix::MakeFromXZ(XAxis, ZAxis).ToQuat()
 - AutomationTest.h: IMPLEMENT_SIMPLE_AUTOMATION_TEST(Class, PrettyName, Flags), EditorContext와 ProductFilter
+- AutomationCommandline.cpp: `Exec_Dev`는 선두 `Automation`을 한 번 소비한 뒤 나머지를 `;`로 나눠 `RunTests`와 `SoftQuit` 같은 하위 명령으로 해석한다. `SoftQuit`가 test queue의 마지막 명령이면 test report 오류를 종료 상태에 반영하고 `RequestExitWithStatus(false, status)`를 호출한다.
 
 ## 공통 TDD 검증 게이트
 
-각 Task의 RED 단계는 제품 구현 전에 아래 함수를 현재 PowerShell 세션에 정의한 뒤 해당 Task의 누적 test 수 4, 6, 8, 11, 12와 실패 패턴으로 호출한다. 먼저 test cpp가 유일한 opening 및 closing guard와 해당 시점의 정확한 macro 수를 갖는지 강제하므로 Task 1부터 독립적으로 전처리할 수 있다. build가 성공하면 RED 실패로 처리하고 editor는 실행하지 않는다. 각 GREEN 단계도 같은 guard 검사를 통과한 뒤 build와 automation을 실행한다. build exit 0을 확인하기 전에는 editor를 시작하지 않으며, 발견 수, Success 수, failure/error 수와 clean exit marker를 계산해 하나라도 계약과 다르면 throw한다. 새 tracked 검증 script는 만들지 않는다.
+각 Task의 RED 단계는 제품 구현 전에 아래 함수를 현재 PowerShell 세션에 정의한 뒤 해당 Task의 누적 test 수 4, 6, 8, 11, 12와 실패 패턴으로 호출한다. 먼저 test cpp가 유일한 opening 및 closing guard와 해당 시점의 정확한 macro 수를 갖는지 강제하므로 Task 1부터 독립적으로 전처리할 수 있다. build가 성공하면 RED 실패로 처리하고 editor는 실행하지 않는다. 각 GREEN 단계도 같은 guard 검사를 통과한 뒤 build와 automation을 실행한다. build exit 0을 확인하기 전에는 editor를 시작하지 않는다.
+
+Automation command line은 `-ExecCmds=Automation RunTests ShipAutonomySim.ShipMovement;SoftQuit;`를 정확히 사용한다. `Automation` 접두사는 전체 `ExecCmds`에서 한 번만 쓰며 세미콜론 뒤에는 접두사 없는 `SoftQuit` 하위 명령만 둔다. 파서는 배열 순서대로 `RunTests` 다음 `SoftQuit`를 queue하고, state machine은 test run이 Complete가 된 뒤 마지막 `SoftQuit`를 처리한다. 종료 시 test report 오류를 `GIsCriticalError`에 반영하고 `TEST COMPLETE. EXIT CODE`를 기록한 다음 같은 status를 `RequestExitWithStatus(false, status)`에 넘긴다. 따라서 GREEN은 RunTests 및 SoftQuit queue 순서, 마지막 test 결과 뒤의 종료 status marker, marker와 process exit code의 일치, 발견 수, Success 수, failure/error 및 unknown command 0, 정상 LogExit을 모두 강제한다. 하나라도 계약과 다르면 throw하며 새 tracked 검증 script는 만들지 않는다.
 
 ~~~powershell
 function Assert-ShipTestTranslationUnitGuard {
@@ -130,20 +133,38 @@ function Invoke-ShipGreenGate {
     $BuildExit = $LASTEXITCODE
     if ($BuildExit -ne 0) { throw "No-Go: $Stage build failed with exit $BuildExit; editor was not started" }
 
-    & "$EngineRoot/Engine/Binaries/Win64/UnrealEditor-Cmd.exe" $Project -Unattended -NoSplash -NoSound -NullRHI -NoP4 -NoAssetRegistryCache -nowrite -NoAnalytics -NoEpicPortal -stdout -FullStdOutLogOutput "-abslog=$AutomationLog" '-ExecCmds=Automation RunTests ShipAutonomySim.ShipMovement;Automation Quit'
+    & "$EngineRoot/Engine/Binaries/Win64/UnrealEditor-Cmd.exe" $Project -Unattended -NoSplash -NoSound -NullRHI -NoP4 -NoAssetRegistryCache -nowrite -NoAnalytics -NoEpicPortal -stdout -FullStdOutLogOutput "-abslog=$AutomationLog" '-ExecCmds=Automation RunTests ShipAutonomySim.ShipMovement;SoftQuit;'
     $EditorExit = $LASTEXITCODE
-    if ($EditorExit -ne 0) { throw "No-Go: $Stage automation process failed with exit $EditorExit" }
-
     $LogText = Get-Content -LiteralPath $AutomationLog -Raw
+    $RunQueuedIndex = $LogText.IndexOf("Automation: RunTests='ShipAutonomySim.ShipMovement' Queued.")
+    $SoftQuitQueuedIndex = $LogText.IndexOf("Automation: SoftQuit Command Queued.")
+    $ExitStatusMatches = [regex]::Matches(
+        $LogText, '\*{4} TEST COMPLETE\. EXIT CODE: (-?\d+) \*{4}')
+    $ReportedExit = if ($ExitStatusMatches.Count -eq 1) {
+        [int]$ExitStatusMatches[0].Groups[1].Value
+    } else {
+        [int]::MinValue
+    }
+    $ExitStatusIndex = if ($ExitStatusMatches.Count -eq 1) {
+        $ExitStatusMatches[0].Index
+    } else {
+        -1
+    }
+    $LastTestCompletedIndex = $LogText.LastIndexOf("Test Completed")
     $FoundMatches = [regex]::Matches($LogText, 'Found\s+(\d+)\s+automation tests')
     $Found = if ($FoundMatches.Count -eq 0) { -1 } else { [int]$FoundMatches[$FoundMatches.Count - 1].Groups[1].Value }
     $Success = [regex]::Matches($LogText, 'Test Completed.*Result=\{Success\}').Count
     $Failure = [regex]::Matches($LogText, 'Test Completed.*Result=\{(?:Fail|Failed|Error|NotRun)\}').Count
     $AutomationErrors = [regex]::Matches($LogText, '(?m)^.*(?:LogAutomationController|LogAutomationCommandLine):\s+Error:|Fatal error:').Count
+    $UnknownAutomationCommands = [regex]::Matches($LogText, 'Unknown Automation command').Count
     $CleanExitMarkers = [regex]::Matches($LogText, 'LogExit: (?:Exiting\.|Editor shut down)').Count
-    if ($Found -ne $ExpectedTests -or $Success -ne $ExpectedTests -or
-        $Failure -ne 0 -or $AutomationErrors -ne 0 -or $CleanExitMarkers -lt 1) {
-        throw "No-Go: $Stage found=$Found success=$Success failure=$Failure errors=$AutomationErrors cleanExit=$CleanExitMarkers"
+    if ($RunQueuedIndex -lt 0 -or $SoftQuitQueuedIndex -le $RunQueuedIndex -or
+        $LastTestCompletedIndex -lt 0 -or $ExitStatusIndex -le $LastTestCompletedIndex -or
+        $ExitStatusMatches.Count -ne 1 -or $ReportedExit -ne $EditorExit -or
+        $EditorExit -ne 0 -or $Found -ne $ExpectedTests -or $Success -ne $ExpectedTests -or
+        $Failure -ne 0 -or $AutomationErrors -ne 0 -or
+        $UnknownAutomationCommands -ne 0 -or $CleanExitMarkers -lt 1) {
+        throw "No-Go: $Stage processExit=$EditorExit reportedExit=$ReportedExit found=$Found success=$Success failure=$Failure errors=$AutomationErrors unknown=$UnknownAutomationCommands cleanExit=$CleanExitMarkers"
     }
 
     $TrackedAfter = (git status --porcelain=v1 --untracked-files=no | Out-String)
@@ -597,7 +618,7 @@ FPS test는 다음 표를 코드의 data row로 사용한다.
 Invoke-ShipGreenGate -ExpectedTests 4 -Stage "Task1"
 ~~~
 
-Expected: guard opening 및 closing 각 1개와 macro 4개를 먼저 확인하고, build exit 0 뒤 발견 4, Success 4, failure 및 automation error 0, clean exit marker 1개 이상이다.
+Expected: guard opening 및 closing 각 1개와 macro 4개를 먼저 확인하고, build exit 0 뒤 발견 4, Success 4, failure 및 automation error 0이다. RunTests 뒤 SoftQuit queue, 마지막 test 뒤 reported exit 0, process exit 0과 정상 LogExit을 모두 확인한다.
 
 - [ ] **Step 8: Task 1 commit**
 
@@ -755,7 +776,7 @@ H (1,0,0)과 normalize(1,1,1), yaw 45와 normalize(0,1,1)에서 atan2 결과 yaw
 Invoke-ShipGreenGate -ExpectedTests 6 -Stage "Task2"
 ~~~
 
-Expected: guard opening 및 closing 각 1개와 macro 6개를 먼저 확인하고, build exit 0 뒤 발견 6, Success 6, failure 및 automation error 0, clean exit marker 1개 이상이다.
+Expected: guard opening 및 closing 각 1개와 macro 6개를 먼저 확인하고, build exit 0 뒤 발견 6, Success 6, failure 및 automation error 0이다. RunTests 뒤 SoftQuit queue, 마지막 test 뒤 reported exit 0, process exit 0과 정상 LogExit을 모두 확인한다.
 
 - [ ] **Step 7: Task 2 commit**
 
@@ -1416,7 +1437,7 @@ void UShipMovement::DrawMovementDebug() const
 Invoke-ShipGreenGate -ExpectedTests 8 -Stage "Task3"
 ~~~
 
-Expected: guard opening 및 closing 각 1개와 macro 8개를 먼저 확인하고, build exit 0 뒤 발견 8, Success 8, failure 및 automation error 0, clean exit marker 1개 이상이다. TransformOwnership의 actual count는 swept actor move 1, ShipPawn mesh scale 0, ShipPawn camera rotation 0과 일치한다. Runtime test는 fallback, invalid 입력과 blocking hit tick에서 debug call 증가가 각각 정확히 1이고, sweep 위치 유지, speed 0과 remaining substep 중단을 단언한다.
+Expected: guard opening 및 closing 각 1개와 macro 8개를 먼저 확인하고, build exit 0 뒤 발견 8, Success 8, failure 및 automation error 0이다. RunTests 뒤 SoftQuit queue, 마지막 test 뒤 reported exit 0, process exit 0과 정상 LogExit을 모두 확인한다. TransformOwnership의 actual count는 swept actor move 1, ShipPawn mesh scale 0, ShipPawn camera rotation 0과 일치한다. Runtime test는 fallback, invalid 입력과 blocking hit tick에서 debug call 증가가 각각 정확히 1이고, sweep 위치 유지, speed 0과 remaining substep 중단을 단언한다.
 
 - [ ] **Step 8: Task 3 commit**
 
@@ -2071,7 +2092,7 @@ bShouldFlushPressedKeysOnViewportFocusLost=True
 Invoke-ShipGreenGate -ExpectedTests 11 -Stage "Task4"
 ~~~
 
-Expected: guard opening 및 closing 각 1개와 macro 11개를 먼저 확인하고, build exit 0 뒤 발견 11, Success 11, failure 및 automation error 0, clean exit marker 1개 이상이다. TransformOwnership의 actual count는 swept actor move 1, ShipPawn mesh scale 1, ShipPawn camera rotation 1과 일치한다. Pawn tests는 즉시 mapping rebuild 뒤 W throttle과 A steer가 비영 값임을 먼저 증명하고, 실제 Triggered, Completed, Canceled, UnPossessed, EndPlay, mapping 제거 횟수 1, controller pressed-key flush 뒤 drag-only step과 늦은 release 뒤 autopilot 입력 보존을 단언한다. OS focus 전환 자체는 PIE에서 보완 검증한다.
+Expected: guard opening 및 closing 각 1개와 macro 11개를 먼저 확인하고, build exit 0 뒤 발견 11, Success 11, failure 및 automation error 0이다. RunTests 뒤 SoftQuit queue, 마지막 test 뒤 reported exit 0, process exit 0과 정상 LogExit을 모두 확인한다. TransformOwnership의 actual count는 swept actor move 1, ShipPawn mesh scale 1, ShipPawn camera rotation 1과 일치한다. Pawn tests는 즉시 mapping rebuild 뒤 W throttle과 A steer가 비영 값임을 먼저 증명하고, 실제 Triggered, Completed, Canceled, UnPossessed, EndPlay, mapping 제거 횟수 1, controller pressed-key flush 뒤 drag-only step과 늦은 release 뒤 autopilot 입력 보존을 단언한다. OS focus 전환 자체는 PIE에서 보완 검증한다.
 
 - [ ] **Step 9: Task 4 commit**
 
@@ -2256,7 +2277,7 @@ void ASimGameMode::EnsureTestShipForFirstPlayer()
 Invoke-ShipGreenGate -ExpectedTests 12 -Stage "Task5"
 ~~~
 
-Expected: guard opening 및 closing 각 1개와 macro 12개를 먼저 확인하고, build exit 0 뒤 발견 12, Success 12, failure 및 automation error 0, clean exit marker 1개 이상이다. Bootstrap test는 정상 BeginPlay 한 번, helper 두 번, ship 한 대와 같은 possession을 단언한다. ShipNavigator, CourseBuilder, ShipCapture 파일은 diff에 없어야 한다.
+Expected: guard opening 및 closing 각 1개와 macro 12개를 먼저 확인하고, build exit 0 뒤 발견 12, Success 12, failure 및 automation error 0이다. RunTests 뒤 SoftQuit queue, 마지막 test 뒤 reported exit 0, process exit 0과 정상 LogExit을 모두 확인한다. Bootstrap test는 정상 BeginPlay 한 번, helper 두 번, ship 한 대와 같은 possession을 단언한다. ShipNavigator, CourseBuilder, ShipCapture 파일은 diff에 없어야 한다.
 
 - [ ] **Step 5: Task 5 commit**
 
@@ -2364,22 +2385,42 @@ if ($FullBuildExit -ne 0 -or $CompileActions -lt 1 -or $LinkActions -lt 1) {
     throw "No-Go: verified full build did not complete; stale editor binary must not run"
 }
 $AutomationLog = "$RepoRoot/ShipAutonomySim/Saved/Logs/ShipMovement-FinalAutomation.log"
-& "$EngineRoot/Engine/Binaries/Win64/UnrealEditor-Cmd.exe" $Project -Unattended -NoSplash -NoSound -NullRHI -NoP4 -NoAssetRegistryCache -nowrite -NoAnalytics -NoEpicPortal -stdout -FullStdOutLogOutput "-abslog=$AutomationLog" '-ExecCmds=Automation RunTests ShipAutonomySim.ShipMovement;Automation Quit'
-if ($LASTEXITCODE -ne 0) { throw "No-Go: automation process failed" }
+& "$EngineRoot/Engine/Binaries/Win64/UnrealEditor-Cmd.exe" $Project -Unattended -NoSplash -NoSound -NullRHI -NoP4 -NoAssetRegistryCache -nowrite -NoAnalytics -NoEpicPortal -stdout -FullStdOutLogOutput "-abslog=$AutomationLog" '-ExecCmds=Automation RunTests ShipAutonomySim.ShipMovement;SoftQuit;'
+$EditorExit = $LASTEXITCODE
 $AutomationText = Get-Content -LiteralPath $AutomationLog -Raw
+$RunQueuedIndex = $AutomationText.IndexOf("Automation: RunTests='ShipAutonomySim.ShipMovement' Queued.")
+$SoftQuitQueuedIndex = $AutomationText.IndexOf("Automation: SoftQuit Command Queued.")
+$ExitStatusMatches = [regex]::Matches(
+    $AutomationText, '\*{4} TEST COMPLETE\. EXIT CODE: (-?\d+) \*{4}')
+$ReportedExit = if ($ExitStatusMatches.Count -eq 1) {
+    [int]$ExitStatusMatches[0].Groups[1].Value
+} else {
+    [int]::MinValue
+}
+$ExitStatusIndex = if ($ExitStatusMatches.Count -eq 1) {
+    $ExitStatusMatches[0].Index
+} else {
+    -1
+}
+$LastTestCompletedIndex = $AutomationText.LastIndexOf("Test Completed")
 $FoundMatches = [regex]::Matches($AutomationText, 'Found\s+(\d+)\s+automation tests')
 $FoundTests = if ($FoundMatches.Count -eq 0) { -1 } else { [int]$FoundMatches[$FoundMatches.Count - 1].Groups[1].Value }
 $SuccessTests = [regex]::Matches($AutomationText, 'Test Completed.*Result=\{Success\}').Count
 $FailedTests = [regex]::Matches($AutomationText, 'Test Completed.*Result=\{(?:Fail|Failed|Error|NotRun)\}').Count
 $AutomationErrors = [regex]::Matches($AutomationText, '(?m)^(?:.*(?:LogAutomationController|LogAutomationCommandLine):\s+Error:|.*Fatal error:)').Count
+$UnknownAutomationCommands = [regex]::Matches($AutomationText, 'Unknown Automation command').Count
 $AutomationCleanExit = [regex]::Matches($AutomationText, 'LogExit: (?:Exiting\.|Editor shut down)').Count
-if ($FoundTests -ne 12 -or $SuccessTests -ne 12 -or $FailedTests -ne 0 -or
-    $AutomationErrors -ne 0 -or $AutomationCleanExit -lt 1) {
-    throw "No-Go: automation found=$FoundTests success=$SuccessTests failed=$FailedTests errors=$AutomationErrors cleanExit=$AutomationCleanExit"
+if ($RunQueuedIndex -lt 0 -or $SoftQuitQueuedIndex -le $RunQueuedIndex -or
+    $LastTestCompletedIndex -lt 0 -or $ExitStatusIndex -le $LastTestCompletedIndex -or
+    $ExitStatusMatches.Count -ne 1 -or $ReportedExit -ne $EditorExit -or
+    $EditorExit -ne 0 -or $FoundTests -ne 12 -or $SuccessTests -ne 12 -or
+    $FailedTests -ne 0 -or $AutomationErrors -ne 0 -or
+    $UnknownAutomationCommands -ne 0 -or $AutomationCleanExit -lt 1) {
+    throw "No-Go: automation processExit=$EditorExit reportedExit=$ReportedExit found=$FoundTests success=$SuccessTests failed=$FailedTests errors=$AutomationErrors unknown=$UnknownAutomationCommands cleanExit=$AutomationCleanExit"
 }
 ~~~
 
-Expected: full build 증거가 먼저 있어야 editor를 시작한다. 발견 12, 정확한 Success 12, failed/error 0, clean exit marker 1개 이상이어야 한다. 명령 exit 0만으로 통과 처리하지 않는다.
+Expected: full build 증거가 먼저 있어야 editor를 시작한다. RunTests 다음에 SoftQuit가 queue되고 마지막 test 결과 뒤 reported exit 0이 기록되며 process exit 0과 일치해야 한다. 발견 12, 정확한 Success 12, failed/error 및 unknown command 0, 정상 LogExit이 모두 필요하며 명령 exit 0만으로 통과 처리하지 않는다.
 
 - [ ] **Step 4: no-write MainLevel 명령줄 검증**
 
@@ -2403,7 +2444,7 @@ if ($AllMapChecks -ne 1 -or $PassingMapChecks -ne 1 -or $LoadErrors -ne 0 -or
 }
 ~~~
 
-Expected: exit 0, MapCheck 0 Error와 0 Warning, LoadErrors 및 Fatal과 severity Error 0, clean LogExit. QUIT이나 저장 가능한 editor 실행으로 대체하지 않는다.
+Expected: exit 0, MapCheck 0 Error와 0 Warning, LoadErrors 및 Fatal과 severity Error 0, clean LogExit. 이 경로의 `QUIT_EDITOR`는 Automation parser를 통하지 않는 editor console 종료 명령이므로 그대로 유지하며 QUIT이나 저장 가능한 editor 실행으로 대체하지 않는다.
 
 - [ ] **Step 5: Config, map과 Git 전후 대조**
 
@@ -2513,7 +2554,7 @@ Expected: 제품 변경은 File Structure의 생성 및 수정 목록만 포함�
 - [x] Completed와 Canceled release handler 모두 manual-active guard를 거치며 늦은 event 뒤 autopilot setter 값 보존을 단언함
 - [x] runtime source 전체 transform mutator denylist를 유지하고 Task 3의 ownership count 1, 0, 0을 Task 4 RED에서 1, 1, 1로 전환해 미래 child setup을 앞선 GREEN이 요구하지 않도록 고정함
 - [x] 정상, Water fallback과 오류 tick 모두 scope-exit에서 debug를 frame당 정확히 한 번 호출함
-- [x] 모든 GREEN gate가 build exit 뒤 발견 수, Success 수, failure/error 0과 clean exit를 강제함
+- [x] 모든 GREEN gate와 최종 automation이 단일 Automation 접두사, RunTests 뒤 SoftQuit queue, 마지막 test 뒤 reported exit와 process exit 일치, 발견 수, Success 수, failure/error 및 unknown command 0과 clean LogExit을 강제함
 - [x] final build는 project 내부 ignored UBT 산출물만 -Clean한 뒤 compile 및 link action을 강제함
 - [x] 제품 변경 경로와 변경 금지 경로를 분리함
 - [x] 4단계 Navigator, 코스와 벽 및 5단계 Capture가 구현 Task에 없음을 확인함
