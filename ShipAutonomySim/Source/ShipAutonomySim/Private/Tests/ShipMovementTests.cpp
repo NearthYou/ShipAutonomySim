@@ -1,11 +1,26 @@
 #if WITH_DEV_AUTOMATION_TESTS
 #include <limits>
 
+#include "Camera/CameraComponent.h"
 #include "Components/BoxComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "Engine/Engine.h"
+#include "Engine/EngineBaseTypes.h"
+#include "Engine/GameInstance.h"
+#include "Engine/LocalPlayer.h"
 #include "Engine/World.h"
+#include "EnhancedActionKeyMapping.h"
+#include "EnhancedInputComponent.h"
+#include "EnhancedInputSubsystems.h"
+#include "EnhancedPlayerInput.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/SpringArmComponent.h"
 #include "HAL/FileManager.h"
+#include "InputAction.h"
+#include "InputCoreTypes.h"
+#include "InputMappingContext.h"
+#include "InputTriggers.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/FileHelper.h"
@@ -611,6 +626,14 @@ struct FShipMovementTestAccessor
     {
         return Movement.TestDebugDrawInvocationCount;
     }
+    static int32 Substeps(const UShipMovement& Movement)
+    {
+        return Movement.LastSubsteps;
+    }
+    static double StepSeconds(const UShipMovement& Movement)
+    {
+        return Movement.LastStepSeconds;
+    }
 };
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -667,9 +690,9 @@ bool FShipTransformOwnershipTest::RunTest(const FString&)
         {TEXT("/Private/ShipMovement.cpp"),
          TEXT("Owner->SetActorLocationAndRotation("), 1},
         {TEXT("/Private/ShipPawn.cpp"),
-         TEXT("VisualMesh->SetRelativeScale3D(FVector(2.0,1.0,1.0));"), 0},
+         TEXT("VisualMesh->SetRelativeScale3D(FVector(2.0,1.0,1.0));"), 1},
         {TEXT("/Private/ShipPawn.cpp"),
-         TEXT("CameraBoom->SetRelativeRotation(FRotator(CameraPitchDegrees,0.0,0.0));"), 0}
+         TEXT("CameraBoom->SetRelativeRotation(FRotator(CameraPitchDegrees,0.0,0.0));"), 1}
     };
     const auto Compact = [](FString Value)
     {
@@ -816,6 +839,375 @@ bool FShipMovementRuntimeTest::RunTest(const FString&)
         FShipMovementTestAccessor::DebugDrawCalls(*Movement), BeforeInvalid + 1);
 
     return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipPawnConstructionTest,
+    "ShipAutonomySim.ShipMovement.Pawn.Construction",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipPawnInputLifecycleTest,
+    "ShipAutonomySim.ShipMovement.Pawn.InputLifecycle",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipPawnFocusLossTest,
+    "ShipAutonomySim.ShipMovement.Pawn.FocusLossAndAutopilotGuard",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+class FScopedShipInputWorld
+{
+public:
+    static constexpr float InputFrameSeconds = 1.0f / 60.0f;
+
+    FScopedShipInputWorld()
+    {
+        GameInstance = NewObject<UGameInstance>(GEngine);
+        GameInstance->AddToRoot();
+        const FName WorldName = MakeUniqueObjectName(
+            GetTransientPackage(),
+            UWorld::StaticClass(),
+            TEXT("ShipInputAutomationWorld"));
+        GameInstance->InitializeStandalone(WorldName, GetTransientPackage());
+        World = GameInstance->GetWorld();
+        check(World != nullptr && World->SetGameMode(FURL()));
+
+        LocalPlayer = NewObject<ULocalPlayer>(GEngine, GEngine->LocalPlayerClass);
+        check(GameInstance->AddLocalPlayer(LocalPlayer, 0) == 0);
+        World->InitializeActorsForPlay(FURL());
+        FString SpawnError;
+        check(LocalPlayer->SpawnPlayActor(TEXT(""), SpawnError, World));
+        Controller = LocalPlayer->GetPlayerController(World);
+        Subsystem =
+            LocalPlayer->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>();
+        check(Controller != nullptr && Subsystem != nullptr);
+        check(Cast<UEnhancedPlayerInput>(Controller->PlayerInput) != nullptr);
+        check(Cast<UEnhancedInputComponent>(Controller->InputComponent) != nullptr);
+    }
+
+    ~FScopedShipInputWorld()
+    {
+        if (World != nullptr && World->HasBegunPlay())
+        {
+            World->EndPlay(EEndPlayReason::Quit);
+        }
+        if (GameInstance != nullptr)
+        {
+            GameInstance->Shutdown();
+            GameInstance->RemoveFromRoot();
+        }
+        if (World != nullptr)
+        {
+            GEngine->DestroyWorldContext(World);
+            World->DestroyWorld(false);
+        }
+    }
+
+    void StartPlay()
+    {
+        if (!World->HasBegunPlay())
+        {
+            World->BeginPlay();
+        }
+    }
+
+    AShipPawn& PossessShip()
+    {
+        StartPlay();
+        AShipPawn* Ship = Cast<AShipPawn>(Controller->GetPawn());
+        if (Ship == nullptr)
+        {
+            Ship = World->SpawnActor<AShipPawn>();
+            Controller->Possess(Ship);
+        }
+        check(Ship != nullptr && Ship->HasActorBegunPlay());
+        check(Cast<UEnhancedInputComponent>(Ship->InputComponent) != nullptr);
+        FModifyContextOptions RebuildOptions;
+        RebuildOptions.bForceImmediately = true;
+        Subsystem->RequestRebuildControlMappings(
+            RebuildOptions,
+            EInputMappingRebuildType::Rebuild);
+        TickInput();
+        return *Ship;
+    }
+
+    void Press(const FKey& Key)
+    {
+        Controller->InputKey(FInputKeyParams(Key, IE_Pressed, 1.0));
+        TickInput();
+    }
+
+    void QueueRelease(const FKey& Key)
+    {
+        Controller->InputKey(FInputKeyParams(Key, IE_Released, 0.0));
+    }
+
+    void Release(const FKey& Key)
+    {
+        QueueRelease(Key);
+        TickInput();
+    }
+
+    void TickInput()
+    {
+        Controller->PlayerTick(InputFrameSeconds);
+    }
+
+    UGameInstance* GameInstance = nullptr;
+    UWorld* World = nullptr;
+    ULocalPlayer* LocalPlayer = nullptr;
+    APlayerController* Controller = nullptr;
+    UEnhancedInputLocalPlayerSubsystem* Subsystem = nullptr;
+};
+
+struct FShipPawnTestAccessor
+{
+    static UShipMovement& Movement(AShipPawn& Pawn)
+    {
+        return *Pawn.ShipMovement;
+    }
+    static UInputMappingContext& Mapping(AShipPawn& Pawn)
+    {
+        return *Pawn.ManualControlMapping;
+    }
+    static int32 MappingRemovalCount(const AShipPawn& Pawn)
+    {
+        return Pawn.TestManualMappingRemovalCount;
+    }
+    static int32 ThrottleCompletedCount(const AShipPawn& Pawn)
+    {
+        return Pawn.TestThrottleCompletedCount;
+    }
+    static int32 SteerCanceledCount(const AShipPawn& Pawn)
+    {
+        return Pawn.TestSteerCanceledCount;
+    }
+    static void ConfigureSteerAsOngoingHold(
+        AShipPawn& Pawn,
+        UEnhancedInputLocalPlayerSubsystem& Subsystem)
+    {
+        UInputTriggerHold* Hold =
+            NewObject<UInputTriggerHold>(Pawn.ManualControlMapping);
+        Hold->HoldTimeThreshold = 10.0f;
+        bool bConfigured = false;
+        const int32 MappingCount = Pawn.ManualControlMapping->GetMappings().Num();
+        for (int32 MappingIndex = 0; MappingIndex < MappingCount; ++MappingIndex)
+        {
+            FEnhancedActionKeyMapping& Mapping =
+                Pawn.ManualControlMapping->GetMapping(MappingIndex);
+            if (Mapping.Action == Pawn.SteerAction && Mapping.Key == EKeys::D)
+            {
+                Mapping.Triggers.Add(Hold);
+                bConfigured = true;
+                break;
+            }
+        }
+        check(bConfigured);
+        FModifyContextOptions Options;
+        Options.bForceImmediately = true;
+        Subsystem.RequestRebuildControlMappings(Options);
+    }
+    static void DeactivateForAutopilot(AShipPawn& Pawn)
+    {
+        Pawn.DeactivateManualInput();
+    }
+};
+
+bool FShipPawnConstructionTest::RunTest(const FString&)
+{
+    FScopedShipTestWorld TestWorld;
+    AShipPawn* Pawn = TestWorld.World->SpawnActor<AShipPawn>();
+    TestNotNull(TEXT("ship pawn spawned"), Pawn);
+    if (!Pawn)
+    {
+        return false;
+    }
+
+    UBoxComponent* Root = Cast<UBoxComponent>(Pawn->GetRootComponent());
+    TestNotNull(TEXT("box collision root"), Root);
+    if (Root)
+    {
+        TestTrue(TEXT("hull half extents are 100 50 50"),
+            Root->GetUnscaledBoxExtent().Equals(FVector(100.0, 50.0, 50.0)));
+        TestEqual(TEXT("hull query-only collision"),
+            Root->GetCollisionEnabled(), ECollisionEnabled::QueryOnly);
+        TestFalse(TEXT("hull physics disabled"), Root->IsSimulatingPhysics());
+        TestFalse(TEXT("hull gravity disabled"), Root->IsGravityEnabled());
+    }
+
+    UStaticMeshComponent* Visual =
+        Pawn->FindComponentByClass<UStaticMeshComponent>();
+    TestNotNull(TEXT("visual mesh exists"), Visual);
+    if (Visual)
+    {
+        TestTrue(TEXT("visual mesh scale is 2 1 1"),
+            Visual->GetRelativeScale3D().Equals(FVector(2.0, 1.0, 1.0)));
+        TestEqual(TEXT("visual collision disabled"),
+            Visual->GetCollisionEnabled(), ECollisionEnabled::NoCollision);
+        TestFalse(TEXT("visual physics disabled"), Visual->IsSimulatingPhysics());
+    }
+
+    TestNotNull(TEXT("movement component exists"),
+        Pawn->FindComponentByClass<UShipMovement>());
+    TestNotNull(TEXT("spring arm exists"),
+        Pawn->FindComponentByClass<USpringArmComponent>());
+    TestNotNull(TEXT("camera exists"),
+        Pawn->FindComponentByClass<UCameraComponent>());
+    return !HasAnyErrors();
+}
+
+bool FShipPawnInputLifecycleTest::RunTest(const FString&)
+{
+    {
+        FScopedShipInputWorld Input;
+        AShipPawn& Pawn = Input.PossessShip();
+        TestEqual(TEXT("four WASD mappings"),
+            FShipPawnTestAccessor::Mapping(Pawn).GetMappings().Num(), 4);
+        TestTrue(TEXT("context registered"),
+            Input.Subsystem->HasMappingContext(
+                &FShipPawnTestAccessor::Mapping(Pawn)));
+        Input.Press(EKeys::W);
+        TestEqual(TEXT("Triggered forwards throttle"),
+            FShipMovementTestAccessor::Throttle(
+                FShipPawnTestAccessor::Movement(Pawn)),
+            1.0);
+        Input.Release(EKeys::W);
+        TestEqual(TEXT("Completed resets throttle"),
+            FShipMovementTestAccessor::Throttle(
+                FShipPawnTestAccessor::Movement(Pawn)),
+            0.0);
+        TestEqual(TEXT("Completed handler count"),
+            FShipPawnTestAccessor::ThrottleCompletedCount(Pawn), 1);
+
+        Input.Press(EKeys::W);
+        Input.Controller->UnPossess();
+        TestEqual(TEXT("UnPossessed resets throttle"),
+            FShipMovementTestAccessor::Throttle(
+                FShipPawnTestAccessor::Movement(Pawn)),
+            0.0);
+        TestEqual(TEXT("UnPossessed removes context once"),
+            FShipPawnTestAccessor::MappingRemovalCount(Pawn), 1);
+        TestFalse(TEXT("context removed"),
+            Input.Subsystem->HasMappingContext(
+                &FShipPawnTestAccessor::Mapping(Pawn)));
+    }
+    {
+        FScopedShipInputWorld Input;
+        AShipPawn& Pawn = Input.PossessShip();
+        FShipPawnTestAccessor::ConfigureSteerAsOngoingHold(
+            Pawn, *Input.Subsystem);
+        Input.Press(EKeys::D);
+        Input.Release(EKeys::D);
+        TestEqual(TEXT("Canceled binding executed"),
+            FShipPawnTestAccessor::SteerCanceledCount(Pawn), 1);
+        Input.Controller->UnPossess();
+        TestEqual(TEXT("Canceled fixture lifecycle removes context once"),
+            FShipPawnTestAccessor::MappingRemovalCount(Pawn), 1);
+    }
+    {
+        FScopedShipInputWorld Input;
+        AShipPawn& Pawn = Input.PossessShip();
+        Input.Press(EKeys::W);
+        Pawn.Destroy();
+        TestEqual(TEXT("EndPlay resets throttle"),
+            FShipMovementTestAccessor::Throttle(
+                FShipPawnTestAccessor::Movement(Pawn)),
+            0.0);
+        TestEqual(TEXT("EndPlay removes context once"),
+            FShipPawnTestAccessor::MappingRemovalCount(Pawn), 1);
+    }
+    return true;
+}
+
+bool FShipPawnFocusLossTest::RunTest(const FString&)
+{
+    FString InputConfig;
+    TestTrue(TEXT("DefaultInput.ini readable"), FFileHelper::LoadFileToString(
+        InputConfig,
+        *(FPaths::ProjectConfigDir() / TEXT("DefaultInput.ini"))));
+    TestTrue(TEXT("enhanced player input"), InputConfig.Contains(
+        TEXT("DefaultPlayerInputClass=/Script/EnhancedInput.EnhancedPlayerInput")));
+    TestTrue(TEXT("enhanced component"), InputConfig.Contains(
+        TEXT("DefaultInputComponentClass=/Script/EnhancedInput.EnhancedInputComponent")));
+    TestTrue(TEXT("focus loss requests pressed-key flush"), InputConfig.Contains(
+        TEXT("bShouldFlushPressedKeysOnViewportFocusLost=True")));
+
+    {
+        FScopedShipInputWorld Input;
+        AShipPawn& Pawn = Input.PossessShip();
+        UShipMovement& Movement = FShipPawnTestAccessor::Movement(Pawn);
+        Input.Press(EKeys::W);
+        TestTrue(TEXT("W produces non-zero throttle before flush"),
+            FShipMovementTestAccessor::Throttle(Movement) > 0.99);
+        Input.Press(EKeys::A);
+        TestTrue(TEXT("A produces non-zero steer before flush"),
+            FShipMovementTestAccessor::Steer(Movement) < -0.99);
+        FShipMovementTestAccessor::SetState(Movement, 100.0, 0.0);
+        Input.Controller->FlushPressedKeys();
+        Input.TickInput();
+        const float MovementDeltaTime = 1.0f / 120.0f;
+        FShipMovementTestAccessor::Tick(Movement, MovementDeltaTime);
+        TestEqual(TEXT("flush clears throttle"),
+            FShipMovementTestAccessor::Throttle(Movement), 0.0);
+        TestEqual(TEXT("flush clears steer"),
+            FShipMovementTestAccessor::Steer(Movement), 0.0);
+        const FShipMotionParameters Parameters =
+            FShipMotionParameters::Defaults();
+        const int32 MovementSubsteps =
+            FShipMovementTestAccessor::Substeps(Movement);
+        const double MovementStepSeconds =
+            FShipMovementTestAccessor::StepSeconds(Movement);
+        FShipMotionState ExpectedState{100.0, 0.0};
+        double ExpectedDrag = 0.0;
+        for (int32 StepIndex = 0; StepIndex < MovementSubsteps; ++StepIndex)
+        {
+            const FShipMotionStep Step = AdvanceShipMotion(
+                ExpectedState,
+                MakeShipMotionInput(0.0, 0.0),
+                Parameters,
+                MovementStepSeconds);
+            check(Step.bValid);
+            ExpectedDrag = Step.AccelerationCmPerSecondSquared;
+            ExpectedState = Step.NextState;
+        }
+        TestTrue(TEXT("next motion step is drag only"),
+            FMath::Abs(
+                FShipMovementTestAccessor::Acceleration(Movement) -
+                ExpectedDrag) <= 1e-8);
+    }
+    {
+        FScopedShipInputWorld Input;
+        AShipPawn& Pawn = Input.PossessShip();
+        UShipMovement& Movement = FShipPawnTestAccessor::Movement(Pawn);
+        FShipPawnTestAccessor::ConfigureSteerAsOngoingHold(
+            Pawn, *Input.Subsystem);
+        Input.Press(EKeys::W);
+        Input.Press(EKeys::D);
+        const int32 CompletedBefore =
+            FShipPawnTestAccessor::ThrottleCompletedCount(Pawn);
+        const int32 CanceledBefore =
+            FShipPawnTestAccessor::SteerCanceledCount(Pawn);
+        Input.QueueRelease(EKeys::W);
+        Input.QueueRelease(EKeys::D);
+        FShipPawnTestAccessor::DeactivateForAutopilot(Pawn);
+        Movement.SetThrottle(0.65f);
+        Movement.SetSteer(-0.25f);
+        Input.TickInput();
+        TestEqual(TEXT("late Completed was delivered"),
+            FShipPawnTestAccessor::ThrottleCompletedCount(Pawn),
+            CompletedBefore + 1);
+        TestEqual(TEXT("late Canceled was delivered"),
+            FShipPawnTestAccessor::SteerCanceledCount(Pawn),
+            CanceledBefore + 1);
+        TestTrue(TEXT("late release preserves autopilot throttle"),
+            FMath::Abs(
+                FShipMovementTestAccessor::Throttle(Movement) - 0.65) <= 1e-6);
+        TestTrue(TEXT("late release preserves autopilot steer"),
+            FMath::Abs(
+                FShipMovementTestAccessor::Steer(Movement) + 0.25) <= 1e-6);
+    }
+    return true;
 }
 
 #endif // WITH_DEV_AUTOMATION_TESTS
