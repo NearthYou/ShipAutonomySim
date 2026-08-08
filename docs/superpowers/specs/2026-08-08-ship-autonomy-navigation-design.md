@@ -151,9 +151,9 @@ Water subsystem, Ocean component, query 결과 또는 surface 위치가 유효�
 
 ### 일반 Play와 Automation 주입
 
-일반 Play에서는 ACourseBuilder가 시간 기반 새 seed로 FRandomStream을 초기화하고 s를 [-500, 500]에서 뽑는다. initial seed와 실제 s를 한 번 로그에 남긴다.
+UGameplayStatics::HasOption이 false인 일반 Play에서만 ACourseBuilder가 시간 기반 새 seed로 FRandomStream을 초기화하고 s를 [-500, 500]에서 뽑는다. initial seed와 실제 s를 한 번 로그에 남긴다.
 
-Automation에서는 ASimGameMode가 URL option Stage4Slide를 InitGame에서 읽는다. option이 존재하면 유한한 수인지, 범위 안인지 검증한다. 잘못된 option을 random 값으로 대체하지 않고 setup failure 원인으로 보존한다.
+ASimGameMode는 InitGame에서 먼저 UGameplayStatics::HasOption으로 URL option Stage4Slide의 존재 여부를 판정한다. HasOption이 true이면 ParseOption 결과가 비어 있지 않은지, 숫자 변환이 성공했는지, 값이 NaN이나 Inf가 아닌지, [-500, 500] 범위 안인지 검증한다. 어느 조건이라도 실패하면 random 값으로 대체하지 않고 setup failure 원인으로 보존한다. Automation actual-world 11 case는 검증을 통과하는 forced value만 전달한다.
 
 GameMode는 CourseBuilder를 deferred spawn하고 강제 s를 주입한 뒤 FinishSpawning을 호출한다. 이렇게 해야 강제값이 CourseBuilder BeginPlay 전에 들어간다. option이 없을 때만 일반 Play random 경로를 사용한다.
 
@@ -174,8 +174,9 @@ ASimGameMode는 전체 run의 조율자이자 terminal result의 유일한 소�
 - 선박을 시작점에 한 번 spawn하고 첫 player controller가 possess하게 한다.
 - AShipPawn::EnterAutonomy를 호출해 자율주행을 시작한다.
 - Running, Success, Timeout, Collision 중 정확히 한 상태만 소유한다.
+- bRuntimeCalculationError 또는 동등한 run 단위 bool latch를 소유한다.
 - collision, success, timeout 조건을 한 곳에서 우선순위대로 평가한다.
-- terminal 전환과 setup failure를 한 번만 로그에 남긴다.
+- terminal 전환, setup failure와 최초 runtime calculation error를 각각 한 번만 로그에 남긴다.
 
 setup failure는 네 terminal result 중 하나로 위장하지 않는다. run이 Running에 진입하기 전의 별도 부트스트랩 실패다.
 
@@ -213,14 +214,14 @@ UShipMovement는 3단계 책임을 유지한다.
 
 - 실제 runtime transform은 sweep으로만 변경한다.
 - 현재 signed speed를 읽기 전용으로 노출한다.
-- blocking hit 신호를 GameMode의 같은 run 판정까지 잃지 않게 노출한다.
+- blocking hit 신호와 hit actor 또는 component 식별 정보를 GameMode의 같은 run 판정까지 잃지 않게 노출한다.
 - 입력은 기존 SetThrottle과 SetSteer로만 받는다.
 
 새 읽기 경계의 최종 인터페이스 이름과 tick prerequisite에 필요한 선언은 구현 계획 첫 기술 검증에서 현재 로컬 헤더와 기존 test accessor를 다시 확인해 고정한다. 이 설계는 승인되지 않은 별도 speed setter나 transform 통로를 만들지 않는다.
 
 ## runtime 데이터 흐름
 
-1. ASimGameMode::InitGame이 Stage4Slide option 유무와 값을 기록한다.
+1. ASimGameMode::InitGame이 HasOption으로 Stage4Slide option 유무를 구분하고, 존재할 때만 ParseOption 결과를 검증해 기록한다.
 2. ASimGameMode::BeginPlay가 CourseBuilder를 deferred spawn한다.
 3. forced slide가 있으면 CourseBuilder BeginPlay 전에 주입한다.
 4. CourseBuilder가 reference surface, 시작점, 끝점, actual wall과 3점 path를 만든다.
@@ -233,6 +234,8 @@ UShipMovement는 3단계 책임을 유지한다.
 11. terminal 조건이 있으면 우선순위대로 한 결과를 확정하고 Navigator 입력을 0으로 만든다.
 
 Navigator 판단이 movement보다 먼저, GameMode terminal 평가가 movement보다 뒤에 실행되는 순서를 보장해야 한다. 구체적인 tick prerequisite 선언은 구현 계획에서 로컬 UE 5.5.4 tick 헤더를 다시 확인해 고정한다. blocking hit 신호는 이 순서 안에서 누락되지 않게 유지한다.
+
+새 run이 Running에 들어갈 때 runtime calculation error latch를 false로 초기화한다. 그 run의 어느 계산 단계에서든 위치, progress, lookahead 또는 후속 판단값이 유효하지 않으면 GameMode가 latch를 true로 한 번만 바꾼다. 최초 전환에서 Navigator를 비활성화하고 SetThrottle(0), SetSteer(0)을 보낸 뒤 이후 tick에도 두 입력을 0으로 유지한다. 후속 계산이 정상으로 돌아와도 latch를 지우거나 Navigator를 다시 활성화하지 않는다.
 
 ## 3점 polyline 추종
 
@@ -327,6 +330,8 @@ Success 조건은 두 조건을 동시에 만족해야 한다.
 - ship과 end의 XY 거리 100 cm 이하
 - UShipMovement의 abs signed speed 5 cm/s 이하
 
+runtime calculation error latch가 true이면 두 조건이 나중에 만족돼도 Success를 허용하지 않는다.
+
 GameMode는 한 평가 시점에 여러 조건이 참이면 다음 우선순위를 사용한다.
 
 1. Collision
@@ -343,8 +348,10 @@ Timeout 기본값은 45 s인 UPROPERTY다. elapsed time은 run이 Running에 들
 
 | 상황 | 처리 |
 | --- | --- |
-| Stage4Slide option이 비어 있지 않지만 숫자로 해석할 수 없음 | setup failure, random fallback 금지 |
-| forced slide가 범위 밖이거나 비유한 값 | setup failure |
+| Stage4Slide option이 없고 HasOption이 false | 일반 Play random slide 사용 |
+| Stage4Slide option이 있지만 ParseOption 결과가 empty | setup failure, random fallback 금지 |
+| Stage4Slide 값이 junk이거나 숫자 변환 실패 | setup failure, random fallback 금지 |
+| forced slide가 NaN, Inf 또는 [-500, 500] 범위 밖 | setup failure |
 | Water subsystem 또는 Ocean component 없음 | setup failure |
 | wave 제외 reference surface query 실패 | setup failure |
 | target 또는 wall spawn 실패 | setup failure |
@@ -352,12 +359,14 @@ Timeout 기본값은 45 s인 UPROPERTY다. elapsed time은 run이 Running에 들
 | path가 3점이 아니거나 segment 길이가 0 | setup failure |
 | player controller 또는 ship spawn 실패 | setup failure |
 | Movement 또는 Navigator component 없음 | setup failure |
-| Running 중 비유한 위치, progress 또는 lookahead | 입력 0과 오류 로그, Success 금지, Running을 유지해 Timeout으로 종료 |
+| Running 중 위치, progress, lookahead 또는 후속 판단값이 유효하지 않음 | runtime calculation error latch, Navigator 비활성화, 입력 0 유지, Success 금지 |
 | blocking hit | Collision pending 후 우선순위 평가 |
 | goal과 speed 조건 만족 | Success pending |
 | elapsed 45 s 도달 | Timeout pending |
 
 setup failure는 test의 success 수에 포함하지 않는다. map load, spawn, mesh와 Water 원인을 서로 구분해 case 로그와 최종 집계 로그에 남긴다.
+
+runtime calculation error는 Running 진입 뒤에만 발생하는 run 실패이며 setup failure가 아니다. 최초 원인만 로그에 남기고 네 상태 enum에 새 result를 추가하지 않는다. 다른 terminal 조건이 없으면 일반 run은 기존 Timeout으로 귀결된다. Collision이 발생하면 기존 우선순위를 유지한다. Automation은 latch를 관측하는 즉시 runtime calculation error를 별도 fail reason과 count로 기록해 case를 실패시킬 수 있으므로 Timeout까지 기다릴 필요가 없다.
 
 ## debug와 로그
 
@@ -411,18 +420,21 @@ case 사이에서 유지되는 집계는 world가 소유하지 않는 Automation
 
 setup failure는 완료된 결과 행으로 위장하지 않는다. 원인을 별도 로그에 남기고 11건 완전 조건을 실패시킨다. 통과 보고서의 표는 완료된 11개 case를 정확히 한 행씩 가진다.
 
+runtime calculation error도 네 열 결과에 새 열이나 terminal result로 섞지 않는다. Automation test 메모리에 별도 fail reason과 count만 보관하고 latch 관측 즉시 case와 전체 합격을 실패시킨다.
+
 ### 실제 XY footprint 거리
 
-이 과제의 두 회전 box footprint 사이 거리를 직접 반환하는 적용 가능한 UE body 간 거리 API가 없으므로 재현 가능한 2D oriented box 계산을 사용한다.
+이 과제의 두 실제 collision body 사이 XY footprint 거리를 직접 반환하는 적용 가능한 UE body 간 거리 API가 없으므로 재현 가능한 2D convex footprint 계산을 사용한다.
 
-- ship footprint는 UBoxComponent의 실제 world transform과 local half extent를 사용한다.
-- wall footprint는 actual UStaticMeshComponent의 cube bounds, scale과 world transform을 사용한다.
-- 각 box의 네 local XY corner를 world XY로 변환한다.
-- edge 교차, 한 box corner의 다른 box 내부 포함, overlap 또는 blocking hit가 있으면 거리는 0이다.
-- 분리돼 있으면 양쪽 네 corner와 반대 box 네 edge 사이 point-to-segment 거리의 최솟값을 구한다.
+- ship footprint는 UBoxComponent local half extent의 8개 corner를 현재 full world transform으로 변환하고 XY에 투영한 점들의 convex hull이다.
+- wall footprint는 actual wall collision component의 cube local bounds 8개 corner를 full world transform으로 변환하고 XY에 투영한 점들의 convex hull이다.
+- 두 convex hull의 edge 교차 또는 포함으로 overlap이 확인되면 거리는 0이다.
+- blocking hit의 actor가 actual wall이거나 component가 그 wall collision component일 때만 wall gap을 0으로 처리한다.
+- 다른 blocking geometry hit는 Collision terminal로 처리하지만 현재 geometric wall gap을 0으로 덮지 않는다.
+- 두 hull이 분리돼 있으면 양쪽 hull vertex와 반대 hull edge 사이 point-to-segment 거리의 최솟값을 구한다.
 - 매 관측 tick의 값을 run minimum과 비교해 최솟값을 유지한다.
 
-이 값은 실제 회전된 footprint 사이의 Euclidean gap이다. actor origin 거리나 axis-aligned world bounds 거리가 아니다.
+이 값은 현재 선박의 roll, pitch, yaw와 wall full transform을 반영한 XY convex gap이다. 실제 collision mesh 사이 3D body distance가 아니라 그 XY convex 거리의 재현 가능한 대용치이며, actor origin 거리나 axis-aligned world bounds 거리가 아니다.
 
 250 cm는 waypoint 중심선 clearance이므로 별도의 임의 margin 합격값을 두지 않는다. 합격은 min wall distance가 엄격히 0보다 큰지로 판정하고 실제 값을 보고한다.
 
@@ -446,10 +458,10 @@ setup failure는 완료된 결과 행으로 위장하지 않는다. 원인을 �
 
 다음 네 영역을 UObject와 world에서 분리한 순수 계산으로 검증한다.
 
-- course geometry: slide 경계, 짧은 쪽 선택, 3점 path와 course yaw 변환
+- course geometry: slide 경계, 짧은 쪽 선택, 3점 path, course yaw 변환과 Stage4Slide absent, empty, junk, NaN, Inf, 범위 밖 option 계약
 - progress: active segment projection, 단조 progress, 끝점 평면 전환, tick당 최대 한 전환과 lookahead
 - stopping distance: 5 cm/s 이하 0, 유한성과 양의성, speed 증가에 따른 비감소, 3단계 기본값과 같은 적분
-- terminal priority: Collision, Success, Timeout 조합에서 고정 우선순위와 단일 전환
+- terminal priority: Collision, Success, Timeout 조합에서 고정 우선순위와 단일 전환, runtime calculation error latch의 영속성과 Success 금지
 
 부동소수점 비교 허용오차와 test 이름은 구현 계획에서 기존 Stage 3 테스트의 정밀도 관례와 로컬 Automation 선언을 확인해 고정한다. 새로운 합격 margin은 만들지 않는다.
 
@@ -462,6 +474,7 @@ latent test는 11개 case마다 fresh MainLevel, 실제 Water, 실제 Stage 3 US
 - Collision 0
 - Timeout 0
 - setup error 0
+- runtime calculation error 0
 - 모든 min wall distance > 0
 
 기존 Stage 3 Automation test 12개는 이름과 검증 의도를 보존하고 Stage 4 test와 함께 회귀 검증한다.
@@ -493,9 +506,11 @@ ENGINE_API virtual void InitGame(const FString& MapName, const FString& Options,
 
 Engine/Source/Runtime/Engine/Classes/Kismet/GameplayStatics.h
 
-static ENGINE_API FString ParseOption(FString Options, const FString& Key);
+static ENGINE_API FString ParseOption( FString Options, const FString& Key );
 
-Engine/Source/Runtime/Engine/Private/GameplayStatics.cpp에서 option pair를 순회해 일치하는 key의 value를 반환하는 구현을 확인했다.
+static ENGINE_API bool HasOption( FString Options, const FString& InKey );
+
+Engine/Source/Runtime/Engine/Private/GameplayStatics.cpp에서 두 함수가 option pair를 순회하는 구현을 확인했다. ParseOption은 key가 없을 때와 key는 있지만 value가 empty일 때 모두 empty 문자열을 반환한다. HasOption만 두 경우를 구분하므로 false일 때만 random slide를 사용하고, true이면 ParseOption 결과를 별도로 검증한다.
 
 ### deferred spawn과 runtime actor
 
@@ -710,6 +725,6 @@ Niagara 물보라는 5단계 capture가 완료된 뒤의 선택 사항이다. la
 - Success는 goal XY 100 cm와 abs speed 5 cm/s를 함께 요구한다.
 - terminal 우선순위는 Collision, Success, Timeout이고 결과는 한 번만 확정된다.
 - 순수 테스트 네 영역과 actual-world 11 case가 설계 계약을 검증한다.
-- 11 case는 Success 11, Collision 0, Timeout 0, setup error 0, 모든 min wall distance > 0을 만족해야 한다.
+- 11 case는 Success 11, Collision 0, Timeout 0, setup error 0, runtime calculation error 0, 모든 min wall distance > 0을 만족해야 한다.
 - 기존 Stage 3 자동화 테스트 12개를 보존한다.
 - CSV, Saved 결과, capture, 웹 뷰어, PCG, Niagara와 lateral slip 변경이 없다.
