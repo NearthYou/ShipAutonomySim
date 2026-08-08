@@ -1293,7 +1293,7 @@ struct FSimGameModeTestAccessor
 bool FSimGameModeBootstrapTest::RunTest(const FString&)
 {
     FScopedShipInputWorld Input;
-    AShipPawn& InputShip = Input.PossessShip();
+    Input.StartPlay();
     ASimGameMode* GameMode =
         Cast<ASimGameMode>(Input.World->GetAuthGameMode());
     TestNotNull(TEXT("project GameMode exists"), GameMode);
@@ -1309,9 +1309,17 @@ bool FSimGameModeBootstrapTest::RunTest(const FString&)
         Input.Controller->GetLocalPlayer());
     TestNotNull(TEXT("real Enhanced subsystem"), Input.Subsystem);
     AShipPawn* PossessedShip = Cast<AShipPawn>(Input.Controller->GetPawn());
-    TestNotNull(TEXT("ship possessed"), PossessedShip);
-    TestTrue(TEXT("fixture returned possessed ship"),
-        PossessedShip == &InputShip);
+    TestNotNull(TEXT("product BeginPlay possessed ship"), PossessedShip);
+    TArray<AActor*> Ships;
+    UGameplayStatics::GetAllActorsOfClass(
+        Input.World,
+        AShipPawn::StaticClass(),
+        Ships);
+    TestEqual(TEXT("product BeginPlay spawned one ship"), Ships.Num(), 1);
+    if (PossessedShip == nullptr || Ships.Num() != 1)
+    {
+        return false;
+    }
     if (PossessedShip != nullptr)
     {
         TestNotNull(TEXT("possessed ship has Enhanced input component"),
@@ -1320,12 +1328,6 @@ bool FSimGameModeBootstrapTest::RunTest(const FString&)
             Input.Subsystem->HasMappingContext(
                 &FShipPawnTestAccessor::Mapping(*PossessedShip)));
     }
-    TArray<AActor*> Ships;
-    UGameplayStatics::GetAllActorsOfClass(
-        Input.World,
-        AShipPawn::StaticClass(),
-        Ships);
-    TestEqual(TEXT("one ship"), Ships.Num(), 1);
     FSimGameModeTestAccessor::EnsureTestShipForFirstPlayer(*GameMode);
     FSimGameModeTestAccessor::EnsureTestShipForFirstPlayer(*GameMode);
     Ships.Reset();
