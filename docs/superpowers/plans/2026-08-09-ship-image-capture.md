@@ -705,7 +705,7 @@ git commit -m "feat: 선박 캡처 공통 리그 구성" `
 
 #### Steps
 
-- [ ] 5분: `ShipAutonomySim.ShipCapture.Image.ReadbackAndEncoding`을 먼저 등록하고 작은 rendered test world, capture 앞의 known cube를 준비한 뒤 accessor의 `SetupRigOnly`, `SetCaptureResolution(..., 32)`, `CaptureSingleTransaction(..., 0, 0.0)`만 호출한다.
+- [ ] 5분: `ShipAutonomySim.ShipCapture.Image.ReadbackAndEncoding`을 먼저 등록하고 작은 rendered test world와 capture 앞의 known cube를 준비한 뒤 `SetCaptureResolution(*Pawn->GetCapture(), 32)`, `SetupRigOnly(*Pawn)`, `CaptureSingleTransaction(*Pawn->GetCapture(), 0, 0.0)` 순서로만 호출한다. resolution은 target 생성 전 설정하며 `SetupRigOnly` 뒤에는 바꾸지 않는다.
 - [ ] 4분: `SetDepthRelativeLocationForTest`로 optical mismatch를 만든 뒤 반환된 `FShipCaptureTransactionSnapshot`의 실패와 color/depth capture call count 0을 검사한다. test가 capture component를 직접 바꾸거나 읽지 않는다.
 - [ ] 4분: 정상 snapshot에서 color와 depth `CaptureScene()` call count가 각각 1이고 color/depth readback pixel count가 각각 1024인지 검사한다.
 - [ ] 4분: 같은 snapshot의 `RawDepthSamples`가 정확히 1024개이고 각 R이 유한한 view-Z이며 G 0, B 0, A 1인지 검사한다.
@@ -1173,6 +1173,7 @@ function Get-ShipCapturesSnapshot {
 
 $BeforeCaptureSnapshot = @(Get-ShipCapturesSnapshot -Root $CaptureRoot)
 $CreatedLog = $false
+$NoWriteValidationSucceeded = $false
 try {
     & $Editor $Project '/Game/Maps/MainLevel?Stage5Capture=0' `
       -Unattended -NoSplash -NullRHI -NoAudio -NoPause -NoP4 -nowrite `
@@ -1202,17 +1203,19 @@ try {
     if (@(Compare-Object $BeforeCaptureSnapshot $AfterCaptureSnapshot).Count -ne 0) {
         throw 'Saved/ShipCaptures changed during capture-off no-write load; preserve entries for inspection'
     }
+    $NoWriteValidationSucceeded = $true
 } finally {
-    if ($CreatedLog -and (Test-Path -LiteralPath $Log)) {
+    if ($NoWriteValidationSucceeded -and $CreatedLog -and
+        (Test-Path -LiteralPath $Log)) {
         Remove-Item -LiteralPath $Log -Force
     }
 }
-if (Test-Path -LiteralPath $Log) {
+if ($NoWriteValidationSucceeded -and (Test-Path -LiteralPath $Log)) {
     throw 'Exact no-write log cleanup failed'
 }
 ```
 
-- [ ] 자동 판정이 `Saved/ShipCaptures`의 directory, file length, mtime, SHA-256 사전/사후 snapshot 동일성, capture marker 부재, world cleanup, MapCheck error 0, LoadErrors 0, fatal/ensure/crash 0, 정상 `LogExit`와 exact test log cleanup을 모두 요구하는지 확인한다. snapshot이 다르면 새 entry를 임의 삭제하지 않고 그대로 실패시킨다.
+- [ ] 자동 판정이 `Saved/ShipCaptures`의 directory, file length, mtime, SHA-256 사전/사후 snapshot 동일성, capture marker 부재, world cleanup, MapCheck error 0, LoadErrors 0, fatal/ensure/crash 0과 정상 `LogExit`를 모두 통과한 뒤에만 success flag를 설정하는지 확인한다. 성공한 경우에만 exact test log를 삭제하고, 어느 assertion이든 실패하면 raw log와 달라진 Saved entry를 보존하며 cleanup 예외로 원래 실패를 가리지 않는다.
 
 ### 4. A-B, B-A 성능 실행
 
