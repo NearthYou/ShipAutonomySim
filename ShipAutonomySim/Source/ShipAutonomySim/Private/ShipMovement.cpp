@@ -260,7 +260,19 @@ void UShipMovement::TickComponent(
             LastWaterState = WaterState;
         }
         bLastWaterFallback = Surface.bUsedFallback;
-        LastTargetSurfaceZ = Surface.SurfaceZ + WaterlineOffsetCm;
+        const double SafeSurfaceZ = FMath::IsFinite(Surface.SurfaceZ)
+            ? Surface.SurfaceZ
+            : (FMath::IsFinite(CurrentLocation.Z) ? CurrentLocation.Z : 0.0);
+        const double SafeWaterlineOffsetCm =
+            FMath::IsFinite(WaterlineOffsetCm) ? WaterlineOffsetCm : 0.0;
+        const double OffsetSurfaceZ =
+            SafeSurfaceZ + SafeWaterlineOffsetCm;
+        const bool bCanApplyWaterlineOffset =
+            !Surface.bUsedFallback || bHasLastValidSurface;
+        LastTargetSurfaceZ =
+            bCanApplyWaterlineOffset && FMath::IsFinite(OffsetSurfaceZ)
+            ? OffsetSurfaceZ
+            : SafeSurfaceZ;
         if (!Surface.bUsedFallback)
         {
             bHasLastValidSurface = true;

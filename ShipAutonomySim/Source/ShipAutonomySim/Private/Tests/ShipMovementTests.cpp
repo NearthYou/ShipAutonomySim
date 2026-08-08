@@ -634,6 +634,14 @@ struct FShipMovementTestAccessor
     {
         return Movement.LastStepSeconds;
     }
+    static void SetWaterlineOffset(UShipMovement& Movement, double OffsetCm)
+    {
+        Movement.WaterlineOffsetCm = OffsetCm;
+    }
+    static double TargetSurfaceZ(const UShipMovement& Movement)
+    {
+        return Movement.LastTargetSurfaceZ;
+    }
 };
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -810,16 +818,71 @@ bool FShipMovementRuntimeTest::RunTest(const FString&)
     BlockerRoot->SetCollisionResponseToChannel(ECC_Pawn, ECR_Block);
     BlockerRoot->RegisterComponent();
 
-    FShipMovementTestAccessor::SetState(*Movement, 120.0, 0.0);
     const double StartZ = Ship->GetActorLocation().Z;
     Blocker->SetActorLocation(FVector(1000.0, 0.0, StartZ));
+
+    FShipMovementTestAccessor::SetState(*Movement, 0.0, 0.0);
+    FShipMovementTestAccessor::SetWaterlineOffset(*Movement, 75.0);
+    FShipMovementTestAccessor::Tick(*Movement, 1.0f / 30.0f);
+    TestTrue(TEXT("first fallback uses multiple substeps"),
+        FShipMovementTestAccessor::Substeps(*Movement) > 1);
+    TestTrue(TEXT("first fallback offset preserves initial Z"),
+        FMath::Abs(Ship->GetActorLocation().Z - StartZ) <= 1e-6);
+    TestTrue(TEXT("first fallback target remains initial Z"),
+        FMath::Abs(FShipMovementTestAccessor::TargetSurfaceZ(*Movement) -
+            StartZ) <= 1e-6);
+    FShipMovementTestAccessor::Tick(*Movement, 1.0f / 30.0f);
+    TestTrue(TEXT("repeated first fallback preserves initial Z"),
+        FMath::Abs(Ship->GetActorLocation().Z - StartZ) <= 1e-6);
+    TestTrue(TEXT("repeated first fallback target remains stable"),
+        FMath::Abs(FShipMovementTestAccessor::TargetSurfaceZ(*Movement) -
+            StartZ) <= 1e-6);
+
+    const auto IsFiniteLocation = [](const FVector& Location)
+    {
+        return FMath::IsFinite(Location.X) &&
+            FMath::IsFinite(Location.Y) &&
+            FMath::IsFinite(Location.Z);
+    };
+    Ship->SetActorLocation(FVector(0.0, 0.0, StartZ));
+    FShipMovementTestAccessor::SetState(*Movement, 0.0, 0.0);
+    FShipMovementTestAccessor::SetWaterlineOffset(
+        *Movement, std::numeric_limits<double>::quiet_NaN());
+    FShipMovementTestAccessor::Tick(*Movement, 1.0f / 120.0f);
+    TestTrue(TEXT("NaN offset preserves finite actor location"),
+        IsFiniteLocation(Ship->GetActorLocation()));
+    TestTrue(TEXT("NaN offset preserves finite target Z"),
+        FMath::IsFinite(FShipMovementTestAccessor::TargetSurfaceZ(*Movement)));
+    TestTrue(TEXT("NaN offset target remains initial Z"),
+        FMath::Abs(FShipMovementTestAccessor::TargetSurfaceZ(*Movement) -
+            StartZ) <= 1e-6);
+
+    Ship->SetActorLocation(FVector(0.0, 0.0, StartZ));
+    FShipMovementTestAccessor::SetState(*Movement, 0.0, 0.0);
+    FShipMovementTestAccessor::SetWaterlineOffset(
+        *Movement, std::numeric_limits<double>::infinity());
+    FShipMovementTestAccessor::Tick(*Movement, 1.0f / 120.0f);
+    TestTrue(TEXT("infinite offset preserves finite actor location"),
+        IsFiniteLocation(Ship->GetActorLocation()));
+    TestTrue(TEXT("infinite offset preserves finite target Z"),
+        FMath::IsFinite(FShipMovementTestAccessor::TargetSurfaceZ(*Movement)));
+    TestTrue(TEXT("infinite offset target remains initial Z"),
+        FMath::Abs(FShipMovementTestAccessor::TargetSurfaceZ(*Movement) -
+            StartZ) <= 1e-6);
+
+    Ship->SetActorLocation(FVector(0.0, 0.0, StartZ));
+    FShipMovementTestAccessor::SetWaterlineOffset(*Movement, 0.0);
+    FShipMovementTestAccessor::SetState(*Movement, 120.0, 0.0);
+    const int32 BeforeFallback =
+        FShipMovementTestAccessor::DebugDrawCalls(*Movement);
     FShipMovementTestAccessor::Tick(*Movement, 1.0f / 120.0f);
     TestTrue(
         TEXT("fallback moves horizontally"), Ship->GetActorLocation().X > 0.0);
     TestTrue(TEXT("fallback preserves Z"),
         FMath::Abs(Ship->GetActorLocation().Z - StartZ) <= 1e-6);
     TestEqual(TEXT("fallback tick draws debug exactly once"),
-        FShipMovementTestAccessor::DebugDrawCalls(*Movement), 1);
+        FShipMovementTestAccessor::DebugDrawCalls(*Movement),
+        BeforeFallback + 1);
 
     Ship->SetActorLocation(FVector(0.0, 0.0, StartZ));
     Blocker->SetActorLocation(FVector(25.0, 0.0, StartZ));
