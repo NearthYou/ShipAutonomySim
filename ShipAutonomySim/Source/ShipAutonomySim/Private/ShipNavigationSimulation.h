@@ -3,6 +3,8 @@
 #include "CoreMinimal.h"
 #include "ShipNavigationTypes.h"
 
+struct FShipMotionParameters;
+
 enum class EStage4SlideOptionState : uint8
 {
     Absent,
@@ -37,3 +39,28 @@ FShipCourseDefinition BuildCourseDefinition(
     const FTransform& CourseFrame,
     double WaterSurfaceZCm,
     double SlideCm);
+bool AdvancePathProgress(
+    const TArray<FVector>& WorldPath,
+    const FVector& ShipWorldLocation,
+    const FShipPathProgress& Previous,
+    FShipPathProgress& OutProgress);
+bool FindLookaheadTarget(
+    const TArray<FVector>& WorldPath,
+    const FShipPathProgress& Progress,
+    double LookaheadDistanceCm,
+    FVector& OutTarget);
+bool ComputeGuidanceCommands(
+    const FVector& ShipForward,
+    const FVector& ShipLocation,
+    const FVector& LookaheadTarget,
+    double HeadingFullSteerDegrees,
+    double FullThrottleHeadingDegrees,
+    double MinimumThrottleHeadingDegrees,
+    double MinimumThrottle,
+    double& OutHeadingErrorDegrees,
+    float& OutSteer,
+    float& OutThrottle);
+bool ComputeDynamicStoppingDistance(
+    const FShipMotionParameters& Parameters,
+    double InitialForwardSpeedCmPerSecond,
+    double& OutStoppingDistanceCm);

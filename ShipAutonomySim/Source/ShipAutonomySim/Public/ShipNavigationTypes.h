@@ -40,3 +40,9 @@ enum class EShipRuntimeCalculationError : uint8
     InvalidThrottle,
     InvalidStoppingDistance
 };
+
+struct FShipPathProgress
+{
+    int32 ActiveSegmentIndex = 0;
+    double MonotonicDistanceCm = 0.0;
+};
