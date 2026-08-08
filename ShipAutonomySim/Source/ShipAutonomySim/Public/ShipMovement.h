@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "Engine/HitResult.h"
 #include "ShipMovement.generated.h"
 
 class UWaterBodyComponent;
@@ -16,6 +17,8 @@ public:
     UShipMovement();
     void SetThrottle(float Value);
     void SetSteer(float Value);
+    double GetSignedSpeedCmPerSecond() const;
+    bool ConsumeBlockingHit(FHitResult& OutHit);
 
 protected:
     virtual void BeginPlay() override;
@@ -67,6 +70,8 @@ private:
     double ThrottleInput = 0.0;
     double SteerInput = 0.0;
     double SignedSpeedCmPerSecond = 0.0;
+    FHitResult PendingBlockingHit;
+    bool bHasPendingBlockingHit = false;
     double HorizontalYawDegrees = 0.0;
     double LastAcceleration = 0.0;
     double LastYawRate = 0.0;

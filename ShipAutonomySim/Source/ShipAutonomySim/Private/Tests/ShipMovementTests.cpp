@@ -1,5 +1,6 @@
 #if WITH_DEV_AUTOMATION_TESTS
 #include <limits>
+#include <type_traits>
 
 #include "Camera/CameraComponent.h"
 #include "Components/BoxComponent.h"
@@ -7,6 +8,7 @@
 #include "Engine/Engine.h"
 #include "Engine/EngineBaseTypes.h"
 #include "Engine/GameInstance.h"
+#include "Engine/HitResult.h"
 #include "Engine/LocalPlayer.h"
 #include "Engine/World.h"
 #include "EnhancedActionKeyMapping.h"
@@ -18,6 +20,7 @@
 #include "GameFramework/SpringArmComponent.h"
 #include "HAL/FileManager.h"
 #include "InputAction.h"
+#include "InputActionValue.h"
 #include "InputCoreTypes.h"
 #include "InputMappingContext.h"
 #include "InputTriggers.h"
@@ -658,6 +661,13 @@ struct FShipMovementTestAccessor
     {
         return Movement.SignedSpeedCmPerSecond;
     }
+    static void SetPendingBlockingHit(
+        UShipMovement& Movement,
+        const FHitResult& Hit)
+    {
+        Movement.PendingBlockingHit = Hit;
+        Movement.bHasPendingBlockingHit = true;
+    }
     static double Throttle(const UShipMovement& Movement)
     {
         return Movement.ThrottleInput;
@@ -704,6 +714,11 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     FShipTransformOwnershipTest,
     "ShipAutonomySim.ShipMovement.Runtime.TransformOwnership",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipMovementBlockingHitIdentityTest,
+    "ShipAutonomySim.ShipNavigation.Unit.Movement.BlockingHitIdentity",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
 bool FShipTransformOwnershipTest::RunTest(const FString&)
@@ -754,6 +769,27 @@ bool FShipTransformOwnershipTest::RunTest(const FString&)
         {TEXT("/Private/ShipPawn.cpp"),
          TEXT("CameraBoom->SetRelativeRotation(FRotator(CameraPitchDegrees,0.0,0.0));"), 1}
     };
+    struct FActorMutatorFileCount
+    {
+        FString FileSuffix;
+        int32 ExpectedCount;
+        int32 ActualCount = 0;
+    };
+    TArray<FActorMutatorFileCount> ActorMutatorFiles = {
+        {TEXT("/Private/ShipMovement.cpp"), 1},
+        {TEXT("/Private/ShipNavigator.cpp"), 0},
+        {TEXT("/Private/CourseBuilder.cpp"), 0},
+        {TEXT("/Private/SimGameMode.cpp"), 0},
+        {TEXT("/Private/ShipPawn.cpp"), 0}
+    };
+    const TArray<FString> ActorMutators = {
+        TEXT("SetActorTransform("), TEXT("SetActorLocation("),
+        TEXT("SetActorRotation("), TEXT("SetActorLocationAndRotation("),
+        TEXT("SetActorScale3D("), TEXT("TeleportTo("),
+        TEXT("AddActorWorldOffset("), TEXT("AddActorLocalOffset("),
+        TEXT("AddActorWorldRotation("), TEXT("AddActorLocalRotation("),
+        TEXT("AddActorWorldTransform("), TEXT("AddActorLocalTransform(")
+    };
     const auto Compact = [](FString Value)
     {
         Value.ReplaceInline(TEXT(" "), TEXT(""));
@@ -787,6 +823,22 @@ bool FShipTransformOwnershipTest::RunTest(const FString&)
         for (int32 LineIndex = 0; LineIndex < Lines.Num(); ++LineIndex)
         {
             const FString CompactLine = Compact(Lines[LineIndex]);
+            for (const FString& Mutator : ActorMutators)
+            {
+                if (!CompactLine.Contains(Mutator))
+                {
+                    continue;
+                }
+                for (FActorMutatorFileCount& Entry : ActorMutatorFiles)
+                {
+                    if (NormalizedFile.EndsWith(Entry.FileSuffix))
+                    {
+                        ++Entry.ActualCount;
+                        break;
+                    }
+                }
+                break;
+            }
             for (const FString& Mutator : DeniedMutators)
             {
                 if (!CompactLine.Contains(Mutator))
@@ -821,9 +873,78 @@ bool FShipTransformOwnershipTest::RunTest(const FString&)
             Entry.ActualCount,
             Entry.ExpectedCount);
     }
+    for (const FActorMutatorFileCount& Entry : ActorMutatorFiles)
+    {
+        TestEqual(
+            *FString::Printf(TEXT("actor mutator count %s"), *Entry.FileSuffix),
+            Entry.ActualCount,
+            Entry.ExpectedCount);
+    }
     TestTrue(TEXT("only approved swept actor move statement"),
         Compact(ShipMovementSource).Contains(
             TEXT("Owner->SetActorLocationAndRotation(NewLocation,NewRotation,true,&Hit,ETeleportType::None);")));
+    return !HasAnyErrors();
+}
+
+bool FShipMovementBlockingHitIdentityTest::RunTest(const FString&)
+{
+    using FSpeedQueryResult = decltype(
+        static_cast<const UShipMovement*>(nullptr)
+            ->GetSignedSpeedCmPerSecond());
+    static_assert(std::is_same_v<FSpeedQueryResult, double>);
+
+    FScopedShipTestWorld TestWorld;
+    AActor* MovementOwner = TestWorld.World->SpawnActor<AActor>();
+    AActor* HitActor = TestWorld.World->SpawnActor<AActor>();
+    TestNotNull(TEXT("movement owner spawned"), MovementOwner);
+    TestNotNull(TEXT("hit actor spawned"), HitActor);
+    if (MovementOwner == nullptr || HitActor == nullptr)
+    {
+        return false;
+    }
+
+    UShipMovement* Movement = NewObject<UShipMovement>(MovementOwner);
+    UBoxComponent* HitComponent = NewObject<UBoxComponent>(HitActor);
+    HitActor->SetRootComponent(HitComponent);
+    HitActor->AddInstanceComponent(HitComponent);
+    HitComponent->RegisterComponent();
+    TestNotNull(TEXT("movement created"), Movement);
+    if (Movement == nullptr)
+    {
+        return false;
+    }
+
+    FShipMovementTestAccessor::SetState(*Movement, -123.5, 0.0);
+    double SpeedCopy = Movement->GetSignedSpeedCmPerSecond();
+    TestEqual(TEXT("signed speed getter returns copy"), SpeedCopy, -123.5);
+    SpeedCopy = 42.0;
+    TestEqual(
+        TEXT("mutating copy does not change movement"),
+        Movement->GetSignedSpeedCmPerSecond(),
+        -123.5);
+
+    const FHitResult PendingHit(
+        HitActor,
+        HitComponent,
+        FVector(10.0, 20.0, 30.0),
+        FVector::BackwardVector);
+    FShipMovementTestAccessor::SetPendingBlockingHit(*Movement, PendingHit);
+
+    FHitResult ConsumedHit;
+    TestTrue(
+        TEXT("first blocking hit consume succeeds"),
+        Movement->ConsumeBlockingHit(ConsumedHit));
+    TestTrue(TEXT("blocking actor identity preserved"),
+        ConsumedHit.GetActor() == HitActor);
+    TestTrue(TEXT("blocking component identity preserved"),
+        ConsumedHit.GetComponent() == HitComponent);
+
+    FHitResult EmptyHit = PendingHit;
+    TestFalse(
+        TEXT("second blocking hit consume is empty"),
+        Movement->ConsumeBlockingHit(EmptyHit));
+    TestNull(TEXT("empty consume clears actor"), EmptyHit.GetActor());
+    TestNull(TEXT("empty consume clears component"), EmptyHit.GetComponent());
     return !HasAnyErrors();
 }
 
@@ -1022,6 +1143,16 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     "ShipAutonomySim.ShipMovement.Pawn.FocusLossAndAutopilotGuard",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipPawnStaleManualEventsIgnoredTest,
+    "ShipAutonomySim.ShipNavigation.Unit.Pawn.StaleManualEventsIgnored",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipPawnDirectManualInputIgnoredDuringAutonomyTest,
+    "ShipAutonomySim.ShipNavigation.Unit.Pawn.DirectManualInputIgnoredDuringAutonomy",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
 class FScopedShipInputWorld
 {
 public:
@@ -1145,6 +1276,14 @@ struct FShipPawnTestAccessor
     {
         return Pawn.TestThrottleCompletedCount;
     }
+    static int32 ThrottleCanceledCount(const AShipPawn& Pawn)
+    {
+        return Pawn.TestThrottleCanceledCount;
+    }
+    static int32 SteerCompletedCount(const AShipPawn& Pawn)
+    {
+        return Pawn.TestSteerCompletedCount;
+    }
     static int32 SteerCanceledCount(const AShipPawn& Pawn)
     {
         return Pawn.TestSteerCanceledCount;
@@ -1176,9 +1315,104 @@ struct FShipPawnTestAccessor
     }
     static void DeactivateForAutopilot(AShipPawn& Pawn)
     {
-        Pawn.DeactivateManualInput();
+        Pawn.LockManualInputForAutonomy();
+    }
+    static void CallThrottle(AShipPawn& Pawn, float Value)
+    {
+        Pawn.HandleThrottle(FInputActionValue(Value));
+    }
+    static void CallSteer(AShipPawn& Pawn, float Value)
+    {
+        Pawn.HandleSteer(FInputActionValue(Value));
+    }
+    static void CallThrottleCompleted(AShipPawn& Pawn)
+    {
+        Pawn.HandleThrottleCompleted();
+    }
+    static void CallThrottleCanceled(AShipPawn& Pawn)
+    {
+        Pawn.HandleThrottleCanceled();
+    }
+    static void CallSteerCompleted(AShipPawn& Pawn)
+    {
+        Pawn.HandleSteerCompleted();
+    }
+    static void CallSteerCanceled(AShipPawn& Pawn)
+    {
+        Pawn.HandleSteerCanceled();
     }
 };
+
+bool FShipPawnStaleManualEventsIgnoredTest::RunTest(const FString&)
+{
+    FScopedShipInputWorld Input;
+    AShipPawn& Pawn = Input.PossessShip();
+    UShipMovement& Movement = FShipPawnTestAccessor::Movement(Pawn);
+    FShipPawnTestAccessor::DeactivateForAutopilot(Pawn);
+    Movement.SetThrottle(0.65f);
+    Movement.SetSteer(-0.25f);
+
+    const int32 ThrottleCompletedBefore =
+        FShipPawnTestAccessor::ThrottleCompletedCount(Pawn);
+    const int32 ThrottleCanceledBefore =
+        FShipPawnTestAccessor::ThrottleCanceledCount(Pawn);
+    const int32 SteerCompletedBefore =
+        FShipPawnTestAccessor::SteerCompletedCount(Pawn);
+    const int32 SteerCanceledBefore =
+        FShipPawnTestAccessor::SteerCanceledCount(Pawn);
+
+    FShipPawnTestAccessor::CallThrottleCompleted(Pawn);
+    FShipPawnTestAccessor::CallThrottleCanceled(Pawn);
+    FShipPawnTestAccessor::CallSteerCompleted(Pawn);
+    FShipPawnTestAccessor::CallSteerCanceled(Pawn);
+
+    TestEqual(TEXT("late throttle Completed observed"),
+        FShipPawnTestAccessor::ThrottleCompletedCount(Pawn),
+        ThrottleCompletedBefore + 1);
+    TestEqual(TEXT("late throttle Canceled observed"),
+        FShipPawnTestAccessor::ThrottleCanceledCount(Pawn),
+        ThrottleCanceledBefore + 1);
+    TestEqual(TEXT("late steer Completed observed"),
+        FShipPawnTestAccessor::SteerCompletedCount(Pawn),
+        SteerCompletedBefore + 1);
+    TestEqual(TEXT("late steer Canceled observed"),
+        FShipPawnTestAccessor::SteerCanceledCount(Pawn),
+        SteerCanceledBefore + 1);
+    TestTrue(TEXT("late callbacks preserve autonomy throttle"),
+        FMath::IsNearlyEqual(
+            FShipMovementTestAccessor::Throttle(Movement), 0.65, 1e-6));
+    TestTrue(TEXT("late callbacks preserve autonomy steer"),
+        FMath::IsNearlyEqual(
+            FShipMovementTestAccessor::Steer(Movement), -0.25, 1e-6));
+    return !HasAnyErrors();
+}
+
+bool FShipPawnDirectManualInputIgnoredDuringAutonomyTest::RunTest(
+    const FString&)
+{
+    FScopedShipInputWorld Input;
+    AShipPawn& Pawn = Input.PossessShip();
+    UShipMovement& Movement = FShipPawnTestAccessor::Movement(Pawn);
+    FShipPawnTestAccessor::DeactivateForAutopilot(Pawn);
+    Movement.SetThrottle(0.4f);
+    Movement.SetSteer(-0.3f);
+    const FTransform TransformBefore = Pawn.GetActorTransform();
+
+    FShipPawnTestAccessor::CallThrottle(Pawn, 1.0f);
+    FShipPawnTestAccessor::CallThrottle(Pawn, -1.0f);
+    FShipPawnTestAccessor::CallSteer(Pawn, -1.0f);
+    FShipPawnTestAccessor::CallSteer(Pawn, 1.0f);
+
+    TestTrue(TEXT("W and S handlers preserve autonomy throttle"),
+        FMath::IsNearlyEqual(
+            FShipMovementTestAccessor::Throttle(Movement), 0.4, 1e-6));
+    TestTrue(TEXT("A and D handlers preserve autonomy steer"),
+        FMath::IsNearlyEqual(
+            FShipMovementTestAccessor::Steer(Movement), -0.3, 1e-6));
+    TestTrue(TEXT("direct handlers do not move pawn"),
+        Pawn.GetActorTransform().Equals(TransformBefore));
+    return !HasAnyErrors();
+}
 
 bool FShipPawnConstructionTest::RunTest(const FString&)
 {

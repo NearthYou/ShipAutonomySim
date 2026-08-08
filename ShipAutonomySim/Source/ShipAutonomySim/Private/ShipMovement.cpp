@@ -121,6 +121,25 @@ void UShipMovement::SetSteer(float Value)
     SteerInput = FMath::Clamp(static_cast<double>(Value), -1.0, 1.0);
 }
 
+double UShipMovement::GetSignedSpeedCmPerSecond() const
+{
+    return SignedSpeedCmPerSecond;
+}
+
+bool UShipMovement::ConsumeBlockingHit(FHitResult& OutHit)
+{
+    if (!bHasPendingBlockingHit)
+    {
+        OutHit = FHitResult();
+        return false;
+    }
+
+    OutHit = PendingBlockingHit;
+    PendingBlockingHit = FHitResult();
+    bHasPendingBlockingHit = false;
+    return true;
+}
+
 void UShipMovement::BeginPlay()
 {
     Super::BeginPlay();
@@ -363,6 +382,8 @@ void UShipMovement::TickComponent(
         bLastBlockingHit = Hit.bBlockingHit;
         if (Hit.bBlockingHit)
         {
+            PendingBlockingHit = Hit;
+            bHasPendingBlockingHit = true;
             SignedSpeedCmPerSecond = 0.0;
             LastImpactNormal = Hit.ImpactNormal;
             LastHitName =

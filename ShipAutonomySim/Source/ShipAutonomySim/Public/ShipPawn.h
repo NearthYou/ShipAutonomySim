@@ -69,10 +69,12 @@ private:
 
     bool bManualMappingRegistered = false;
     bool bManualInputActive = false;
+    bool bAutonomyInputLocked = false;
 
     void BuildManualInputObjects();
     void ResetManualInput();
     void DeactivateManualInput();
+    void LockManualInputForAutonomy();
     void HandleThrottle(const FInputActionValue& Value);
     void HandleSteer(const FInputActionValue& Value);
     void HandleThrottleCompleted();

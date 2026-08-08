@@ -183,22 +183,38 @@ void AShipPawn::DeactivateManualInput()
     RegisteredInputSubsystem.Reset();
 }
 
+void AShipPawn::LockManualInputForAutonomy()
+{
+    bAutonomyInputLocked = true;
+    DeactivateManualInput();
+    if (ShipMovement != nullptr)
+    {
+        ShipMovement->SetThrottle(0.0f);
+        ShipMovement->SetSteer(0.0f);
+    }
+}
+
 void AShipPawn::HandleThrottle(const FInputActionValue& Value)
 {
-    if (bManualInputActive)
+    if (bAutonomyInputLocked || !bManualInputActive)
     {
-        ShipMovement->SetThrottle(
-            FMath::Clamp(Value.Get<float>(), -1.0f, 1.0f));
+        return;
     }
+
+    ShipMovement->SetThrottle(
+        FMath::Clamp(Value.Get<float>(), -1.0f, 1.0f));
 }
 
 void AShipPawn::HandleSteer(const FInputActionValue& Value)
 {
-    if (bManualInputActive)
+    if (bAutonomyInputLocked || !bManualInputActive)
     {
-        ShipMovement->SetSteer(
-            FMath::Clamp(Value.Get<float>(), -1.0f, 1.0f));
+        return;
     }
+
+
+    ShipMovement->SetSteer(
+        FMath::Clamp(Value.Get<float>(), -1.0f, 1.0f));
 }
 
 void AShipPawn::HandleThrottleCompleted()
@@ -206,6 +222,10 @@ void AShipPawn::HandleThrottleCompleted()
 #if WITH_DEV_AUTOMATION_TESTS
     ++TestThrottleCompletedCount;
 #endif
+    if (bAutonomyInputLocked || !bManualInputActive)
+    {
+        return;
+    }
     HandleThrottleReleased();
 }
 
@@ -214,6 +234,10 @@ void AShipPawn::HandleThrottleCanceled()
 #if WITH_DEV_AUTOMATION_TESTS
     ++TestThrottleCanceledCount;
 #endif
+    if (bAutonomyInputLocked || !bManualInputActive)
+    {
+        return;
+    }
     HandleThrottleReleased();
 }
 
@@ -222,6 +246,10 @@ void AShipPawn::HandleSteerCompleted()
 #if WITH_DEV_AUTOMATION_TESTS
     ++TestSteerCompletedCount;
 #endif
+    if (bAutonomyInputLocked || !bManualInputActive)
+    {
+        return;
+    }
     HandleSteerReleased();
 }
 
@@ -230,23 +258,31 @@ void AShipPawn::HandleSteerCanceled()
 #if WITH_DEV_AUTOMATION_TESTS
     ++TestSteerCanceledCount;
 #endif
+    if (bAutonomyInputLocked || !bManualInputActive)
+    {
+        return;
+    }
     HandleSteerReleased();
 }
 
 void AShipPawn::HandleThrottleReleased()
 {
-    if (bManualInputActive)
+    if (bAutonomyInputLocked || !bManualInputActive)
     {
-        ShipMovement->SetThrottle(0.0f);
+        return;
     }
+
+    ShipMovement->SetThrottle(0.0f);
 }
 
 void AShipPawn::HandleSteerReleased()
 {
-    if (bManualInputActive)
+    if (bAutonomyInputLocked || !bManualInputActive)
     {
-        ShipMovement->SetSteer(0.0f);
+        return;
     }
+
+    ShipMovement->SetSteer(0.0f);
 }
 
 void AShipPawn::UnPossessed()
