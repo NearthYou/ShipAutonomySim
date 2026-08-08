@@ -9,6 +9,39 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogShipMovement, Log, All);
 
+#if WITH_DEV_AUTOMATION_TESTS
+namespace ShipMovementTestTrace
+{
+namespace
+{
+int32 SweptActorMoveCount = 0;
+FVector LastRequestedLocation = FVector::ZeroVector;
+}
+
+void ResetSweptActorMoveTrace()
+{
+    SweptActorMoveCount = 0;
+    LastRequestedLocation = FVector::ZeroVector;
+}
+
+void RecordSweptActorMove(const FVector& RequestedLocation)
+{
+    ++SweptActorMoveCount;
+    LastRequestedLocation = RequestedLocation;
+}
+
+int32 GetSweptActorMoveCount()
+{
+    return SweptActorMoveCount;
+}
+
+FVector GetLastRequestedLocation()
+{
+    return LastRequestedLocation;
+}
+}
+#endif
+
 namespace
 {
 const TCHAR* WaterStateName(uint8 Value)
@@ -216,6 +249,11 @@ void UShipMovement::TickComponent(
             0.0);
         AActor* Owner = GetOwner();
         const FVector CurrentLocation = Owner->GetActorLocation();
+        if (CurrentLocation.ContainsNaN())
+        {
+            SignedSpeedCmPerSecond = 0.0;
+            break;
+        }
         FVector NewLocation =
             CurrentLocation + HorizontalForward * Motion.TravelCm;
 
@@ -312,6 +350,9 @@ void UShipMovement::TickComponent(
         const FQuat NewRotation =
             FRotationMatrix::MakeFromXZ(Basis.Forward, Basis.Up).ToQuat();
         FHitResult Hit;
+#if WITH_DEV_AUTOMATION_TESTS
+        ShipMovementTestTrace::RecordSweptActorMove(NewLocation);
+#endif
         Owner->SetActorLocationAndRotation(
             NewLocation, NewRotation, true, &Hit, ETeleportType::None);
 

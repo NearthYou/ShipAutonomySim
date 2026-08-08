@@ -30,6 +30,13 @@
 #include "ShipPawn.h"
 #include "SimGameMode.h"
 
+namespace ShipMovementTestTrace
+{
+void ResetSweptActorMoveTrace();
+int32 GetSweptActorMoveCount();
+FVector GetLastRequestedLocation();
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     FShipMotionDynamicsTest,
     "ShipAutonomySim.ShipMovement.Motion.Dynamics",
@@ -590,6 +597,51 @@ public:
     UWorld* World = nullptr;
 };
 
+class FScopedRootTransformFault
+{
+public:
+    FScopedRootTransformFault(USceneComponent& InRootComponent, double InvalidZ)
+        : RootComponent(InRootComponent),
+          OriginalTransform(InRootComponent.GetComponentTransform())
+    {
+        FVector FaultedLocation = OriginalTransform.GetLocation();
+        FaultedLocation.Z = InvalidZ;
+        FTransform& MutableTransform =
+            const_cast<FTransform&>(RootComponent.GetComponentTransform());
+#if ENABLE_VECTORIZED_TRANSFORM
+        MutableTransform.SetTranslationRegister(
+            VectorLoadFloat3_W0(&FaultedLocation));
+#else
+        MutableTransform.SetTranslation(FaultedLocation);
+#endif
+    }
+
+    ~FScopedRootTransformFault()
+    {
+        Restore();
+    }
+
+    void Restore()
+    {
+        if (bRestored)
+        {
+            return;
+        }
+
+        FTransform& MutableTransform =
+            const_cast<FTransform&>(RootComponent.GetComponentTransform());
+        MutableTransform = OriginalTransform;
+        RootComponent.SetWorldTransform(
+            OriginalTransform, false, nullptr, ETeleportType::TeleportPhysics);
+        bRestored = true;
+    }
+
+private:
+    USceneComponent& RootComponent;
+    FTransform OriginalTransform;
+    bool bRestored = false;
+};
+
 struct FShipMovementTestAccessor
 {
     static void BeginPlay(UShipMovement& Movement) { Movement.BeginPlay(); }
@@ -869,6 +921,57 @@ bool FShipMovementRuntimeTest::RunTest(const FString&)
     TestTrue(TEXT("infinite offset target remains initial Z"),
         FMath::Abs(FShipMovementTestAccessor::TargetSurfaceZ(*Movement) -
             StartZ) <= 1e-6);
+
+    const FVector FaultRecoveryLocation(0.0, 0.0, StartZ + 125.0);
+    const auto TestInvalidCurrentZ = [&](const TCHAR* CaseName, double InvalidZ)
+    {
+        Ship->SetActorLocation(FaultRecoveryLocation);
+        FShipMovementTestAccessor::SetState(*Movement, 120.0, 0.0);
+        ShipMovementTestTrace::ResetSweptActorMoveTrace();
+        const int32 AppliesBeforeFault =
+            ShipMovementTestTrace::GetSweptActorMoveCount();
+        FScopedRootTransformFault Fault(*ShipRoot, InvalidZ);
+        FShipMovementTestAccessor::Tick(*Movement, 1.0f / 120.0f);
+        TestEqual(
+            *FString::Printf(TEXT("%s current Z skips swept transform"), CaseName),
+            ShipMovementTestTrace::GetSweptActorMoveCount(),
+            AppliesBeforeFault);
+        TestFalse(
+            *FString::Printf(
+                TEXT("%s current Z never reaches swept transform"), CaseName),
+            ShipMovementTestTrace::GetLastRequestedLocation().ContainsNaN());
+        TestEqual(
+            *FString::Printf(TEXT("%s current Z stops signed speed"), CaseName),
+            FShipMovementTestAccessor::Speed(*Movement),
+            0.0);
+        TestFalse(
+            *FString::Printf(TEXT("%s current Z is not reset to zero"), CaseName),
+            FMath::IsFinite(Ship->GetActorLocation().Z) &&
+                FMath::IsNearlyZero(Ship->GetActorLocation().Z));
+
+        Fault.Restore();
+        TestTrue(
+            *FString::Printf(TEXT("%s fixture restores finite transform"), CaseName),
+            !Ship->GetActorLocation().ContainsNaN() &&
+                Ship->GetActorLocation().Equals(FaultRecoveryLocation, 1e-6));
+        Movement->SetThrottle(1.0f);
+        const int32 AppliesBeforeRecovery =
+            ShipMovementTestTrace::GetSweptActorMoveCount();
+        const double XBeforeRecovery = Ship->GetActorLocation().X;
+        FShipMovementTestAccessor::Tick(*Movement, 1.0f / 120.0f);
+        TestTrue(
+            *FString::Printf(TEXT("%s recovery tick applies transform"), CaseName),
+            ShipMovementTestTrace::GetSweptActorMoveCount() >
+                AppliesBeforeRecovery);
+        TestTrue(
+            *FString::Printf(TEXT("%s recovery tick moves ship"), CaseName),
+            Ship->GetActorLocation().X > XBeforeRecovery);
+        Movement->SetThrottle(0.0f);
+    };
+    TestInvalidCurrentZ(
+        TEXT("NaN"), std::numeric_limits<double>::quiet_NaN());
+    TestInvalidCurrentZ(
+        TEXT("infinite"), std::numeric_limits<double>::infinity());
 
     Ship->SetActorLocation(FVector(0.0, 0.0, StartZ));
     FShipMovementTestAccessor::SetWaterlineOffset(*Movement, 0.0);
