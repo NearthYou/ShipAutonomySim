@@ -59,6 +59,7 @@ private:
     double CoastMarginCm = 25.0;
 
     TArray<FVector> WorldPath;
+    double TotalPathLengthCm = 0.0;
     FShipPathProgress Progress;
     FVector LiveTarget = FVector::ZeroVector;
     bool bConfigured = false;

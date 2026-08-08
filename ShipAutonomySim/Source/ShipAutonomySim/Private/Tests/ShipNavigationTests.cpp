@@ -709,6 +709,38 @@ bool FShipNavigatorControlCoastAndErrorTest::RunTest(const FString&)
                 *Fixture.Navigator) >= 0.0f);
     }
 
+    {
+        FNavigatorTestFixture Fixture;
+        TestTrue(TEXT("lateral endpoint fixture configures"),
+            Fixture.Navigator->Configure(
+                Path,
+                Fixture.Movement,
+                Fixture.Wall,
+                Fixture.RunOwner));
+        Fixture.Navigator->SetNavigationEnabled(true);
+        FShipNavigatorTestAccessor::SetForwardSpeedOverride(
+            *Fixture.Navigator, 100.0);
+        FShipNavigatorTestAccessor::SetShipLocationOverride(
+            *Fixture.Navigator, FVector(1000.0, 0.0, 0.0));
+        FShipNavigatorTestAccessor::Tick(*Fixture.Navigator, 1.0f / 60.0f);
+        FShipNavigatorTestAccessor::SetShipLocationOverride(
+            *Fixture.Navigator, FVector(2050.0, 500.0, 0.0));
+        FShipNavigatorTestAccessor::Tick(*Fixture.Navigator, 1.0f / 60.0f);
+        TestTrue(TEXT("lateral endpoint reaches total progress"),
+            FMath::IsNearlyEqual(
+                FShipNavigatorTestAccessor::Progress(*Fixture.Navigator)
+                    .MonotonicDistanceCm,
+                2000.0,
+                1e-6));
+        TestTrue(TEXT("lateral endpoint latches coast on first tick"),
+            FShipNavigatorTestAccessor::CoastLatched(*Fixture.Navigator));
+        TestTrue(TEXT("lateral endpoint commands zero throttle"),
+            FMath::IsNearlyZero(
+                FShipNavigatorTestAccessor::LastThrottleCommand(
+                    *Fixture.Navigator),
+                1e-6f));
+    }
+
     const auto VerifyRuntimeError = [this, &Path](
         const TCHAR* Label,
         int32 CaseIndex,

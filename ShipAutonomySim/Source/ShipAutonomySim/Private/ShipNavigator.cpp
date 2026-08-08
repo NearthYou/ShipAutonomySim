@@ -23,6 +23,7 @@ bool UShipNavigator::Configure(
     SetNavigationEnabled(false);
     bConfigured = false;
     WorldPath.Reset();
+    TotalPathLengthCm = 0.0;
     if (InWorldPath.Num() != 3
         || InMovement == nullptr
         || !IsValid(InActualWall)
@@ -39,6 +40,7 @@ bool UShipNavigator::Configure(
             return false;
         }
     }
+    double ValidatedTotalPathLengthCm = 0.0;
     for (int32 Index = 0; Index < InWorldPath.Num() - 1; ++Index)
     {
         const double SegmentLengthSquared =
@@ -48,9 +50,16 @@ bool UShipNavigator::Configure(
         {
             return false;
         }
+        ValidatedTotalPathLengthCm += FMath::Sqrt(SegmentLengthSquared);
+        if (!FMath::IsFinite(ValidatedTotalPathLengthCm)
+            || ValidatedTotalPathLengthCm < 0.0)
+        {
+            return false;
+        }
     }
 
     WorldPath = InWorldPath;
+    TotalPathLengthCm = ValidatedTotalPathLengthCm;
     Movement = InMovement;
     ActualWall = InActualWall;
     RunOwner = InRunOwner;
@@ -223,8 +232,8 @@ void UShipNavigator::TickComponent(
 
     if (Progress.ActiveSegmentIndex == WorldPath.Num() - 2)
     {
-        const double RemainingDistanceCm =
-            FVector::DistXY(ShipLocation, WorldPath.Last());
+        const double RemainingDistanceCm = FMath::Max(
+            0.0, TotalPathLengthCm - Progress.MonotonicDistanceCm);
         double SignedSpeedCmPerSecond =
             Movement->GetSignedSpeedCmPerSecond();
 #if WITH_DEV_AUTOMATION_TESTS
