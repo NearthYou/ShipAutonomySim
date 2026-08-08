@@ -21,6 +21,30 @@ double EquilibriumSpeed(const FShipMotionParameters& Parameters)
 
     return Parameters.MaxThrustAccel / Parameters.LinearDragCoeff;
 }
+
+bool IsFiniteVector(const FVector& Value)
+{
+    return FMath::IsFinite(Value.X) &&
+        FMath::IsFinite(Value.Y) &&
+        FMath::IsFinite(Value.Z);
+}
+
+FShipSurfaceSample MakeFallback(
+    EShipWaterState State,
+    const TOptional<FShipSurfaceSample>& LastValidSample,
+    double CurrentActorZ)
+{
+    if (LastValidSample.IsSet())
+    {
+        return {
+            State,
+            LastValidSample->SurfaceZ,
+            LastValidSample->Normal,
+            true};
+    }
+
+    return {State, CurrentActorZ, FVector::UpVector, true};
+}
 }
 
 FShipMotionInput MakeShipMotionInput(double Throttle, double Steer)
@@ -183,4 +207,118 @@ FShipValidatedMotionParameters ValidateShipMotionParameters(
         bDefaults
             ? EShipMotionParameterState::Defaults
             : EShipMotionParameterState::Tuned};
+}
+
+FShipSurfaceSample ResolveWaterSurfaceSample(
+    bool bSubsystemValid,
+    bool bComponentValid,
+    bool bHasWaves,
+    const FWaterBodyQueryResult* QueryResult,
+    const TOptional<FShipSurfaceSample>& LastValidSample,
+    double CurrentActorZ)
+{
+    if (!bSubsystemValid || !bComponentValid || QueryResult == nullptr)
+    {
+        return MakeFallback(
+            EShipWaterState::ComponentInvalid,
+            LastValidSample,
+            CurrentActorZ);
+    }
+
+    if (QueryResult->IsInExclusionVolume())
+    {
+        return MakeFallback(
+            EShipWaterState::Excluded,
+            LastValidSample,
+            CurrentActorZ);
+    }
+
+    const EWaterBodyQueryFlags RequiredFlags =
+        EWaterBodyQueryFlags::ComputeLocation |
+        EWaterBodyQueryFlags::ComputeNormal;
+    if (!EnumHasAllFlags(QueryResult->GetQueryFlags(), RequiredFlags))
+    {
+        return MakeFallback(
+            EShipWaterState::QueryInvalid,
+            LastValidSample,
+            CurrentActorZ);
+    }
+
+    const FVector Location = QueryResult->GetWaterSurfaceLocation();
+    FVector Normal = QueryResult->GetWaterSurfaceNormal();
+    if (!IsFiniteVector(Location) ||
+        !IsFiniteVector(Normal) ||
+        !Normal.Normalize() ||
+        Normal.Z < ShipMinSurfaceNormalZ)
+    {
+        return MakeFallback(
+            EShipWaterState::QueryInvalid,
+            LastValidSample,
+            CurrentActorZ);
+    }
+
+    return {
+        bHasWaves
+            ? EShipWaterState::ValidWaves
+            : EShipWaterState::ValidNoWaves,
+        Location.Z,
+        Normal,
+        false};
+}
+
+FShipSurfaceBasis BuildShipSurfaceBasis(
+    double YawDegrees,
+    const FVector& SurfaceNormal,
+    const TOptional<FVector>& LastValidNormal)
+{
+    const double YawRadians = FMath::DegreesToRadians(YawDegrees);
+    const FVector HorizontalHeading(
+        FMath::Cos(YawRadians), FMath::Sin(YawRadians), 0.0);
+    FVector Normal = SurfaceNormal;
+    const auto AcceptNormal = [](FVector& Candidate)
+    {
+        return IsFiniteVector(Candidate) &&
+            Candidate.Normalize() &&
+            Candidate.Z >= ShipMinSurfaceNormalZ;
+    };
+
+    const bool bUsedFallback = !AcceptNormal(Normal);
+    if (bUsedFallback)
+    {
+        if (LastValidNormal.IsSet())
+        {
+            Normal = LastValidNormal.GetValue();
+            if (!AcceptNormal(Normal))
+            {
+                Normal = FVector::UpVector;
+            }
+        }
+        else
+        {
+            Normal = FVector::UpVector;
+        }
+    }
+
+    FVector Forward = HorizontalHeading - FVector::UpVector *
+        (FVector::DotProduct(HorizontalHeading, Normal) / Normal.Z);
+    FVector Right = FVector::CrossProduct(Normal, Forward);
+    FVector Up = FVector::CrossProduct(Forward, Right);
+    const bool bValid =
+        IsFiniteVector(Forward) &&
+        IsFiniteVector(Right) &&
+        IsFiniteVector(Up) &&
+        Forward.Normalize() &&
+        Right.Normalize() &&
+        Up.Normalize();
+    if (!bValid)
+    {
+        return {
+            HorizontalHeading,
+            FVector::CrossProduct(
+                FVector::UpVector, HorizontalHeading).GetSafeNormal(),
+            FVector::UpVector,
+            true};
+    }
+
+    return {Forward, Right, Up, bUsedFallback};
 }

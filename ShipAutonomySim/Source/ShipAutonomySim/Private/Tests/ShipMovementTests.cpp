@@ -364,4 +364,187 @@ bool FShipMotionFrameRatesAndHitchTest::RunTest(const FString&)
     return !HasAnyErrors();
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipWaterClassificationTest,
+    "ShipAutonomySim.ShipMovement.Water.Classification",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipSurfaceBasisTest,
+    "ShipAutonomySim.ShipMovement.Water.SurfaceBasis",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FShipWaterClassificationTest::RunTest(const FString&)
+{
+    const EWaterBodyQueryFlags CompleteFlags =
+        EWaterBodyQueryFlags::ComputeLocation |
+        EWaterBodyQueryFlags::ComputeNormal |
+        EWaterBodyQueryFlags::IncludeWaves;
+
+    FWaterBodyQueryResult CompleteQuery;
+    CompleteQuery.SetQueryFlags(CompleteFlags);
+    CompleteQuery.SetWaterSurfaceLocation(FVector(10.0, 20.0, 125.0));
+    CompleteQuery.SetWaterSurfaceNormal(FVector(0.0, 0.0, 2.0));
+
+    const FShipSurfaceSample Waves = ResolveWaterSurfaceSample(
+        true, true, true, &CompleteQuery, TOptional<FShipSurfaceSample>(), 15.0);
+    TestEqual(TEXT("waves classified"), Waves.State, EShipWaterState::ValidWaves);
+    TestEqual(TEXT("waves surface Z"), Waves.SurfaceZ, 125.0);
+    TestTrue(TEXT("waves normal normalized"),
+        Waves.Normal.Equals(FVector::UpVector, 1e-6));
+    TestFalse(TEXT("waves do not use fallback"), Waves.bUsedFallback);
+
+    const FShipSurfaceSample NoWaves = ResolveWaterSurfaceSample(
+        true, true, false, &CompleteQuery, TOptional<FShipSurfaceSample>(), 15.0);
+    TestEqual(TEXT("no-waves classified"),
+        NoWaves.State, EShipWaterState::ValidNoWaves);
+    TestFalse(TEXT("no-waves do not use fallback"), NoWaves.bUsedFallback);
+
+    const FVector LastNormal = FVector(0.0, 1.0, 1.0).GetSafeNormal();
+    const TOptional<FShipSurfaceSample> LastValid(FShipSurfaceSample{
+        EShipWaterState::ValidWaves, 88.0, LastNormal, false});
+
+    FWaterBodyQueryResult ExcludedQuery = CompleteQuery;
+    ExcludedQuery.SetIsInExclusionVolume(true);
+    const FShipSurfaceSample Excluded = ResolveWaterSurfaceSample(
+        true, true, true, &ExcludedQuery, LastValid, 15.0);
+    TestEqual(TEXT("exclusion classified"),
+        Excluded.State, EShipWaterState::Excluded);
+    TestTrue(TEXT("exclusion uses fallback"), Excluded.bUsedFallback);
+    TestEqual(TEXT("exclusion preserves last Z"), Excluded.SurfaceZ, 88.0);
+    TestTrue(TEXT("exclusion preserves last normal"),
+        Excluded.Normal.Equals(LastNormal, 1e-6));
+
+    FWaterBodyQueryResult MissingFlagsQuery;
+    MissingFlagsQuery.SetQueryFlags(EWaterBodyQueryFlags::ComputeLocation);
+    MissingFlagsQuery.SetWaterSurfaceLocation(FVector(0.0, 0.0, 50.0));
+    const FShipSurfaceSample MissingFlags = ResolveWaterSurfaceSample(
+        true, true, true, &MissingFlagsQuery, LastValid, 15.0);
+    TestEqual(TEXT("missing flags invalid"),
+        MissingFlags.State, EShipWaterState::QueryInvalid);
+
+    FWaterBodyQueryResult NonFiniteLocationQuery = CompleteQuery;
+    NonFiniteLocationQuery.SetWaterSurfaceLocation(FVector(
+        std::numeric_limits<double>::quiet_NaN(), 0.0, 50.0));
+    const FShipSurfaceSample NonFiniteLocation = ResolveWaterSurfaceSample(
+        true, true, true, &NonFiniteLocationQuery, LastValid, 15.0);
+    TestEqual(TEXT("non-finite location invalid"),
+        NonFiniteLocation.State, EShipWaterState::QueryInvalid);
+
+    FWaterBodyQueryResult LowNormalQuery = CompleteQuery;
+    LowNormalQuery.SetWaterSurfaceNormal(FVector(1.0, 0.0, 0.05));
+    const FShipSurfaceSample LowNormal = ResolveWaterSurfaceSample(
+        true, true, true, &LowNormalQuery, LastValid, 15.0);
+    TestEqual(TEXT("low normal invalid"),
+        LowNormal.State, EShipWaterState::QueryInvalid);
+
+    const FShipSurfaceSample MissingSubsystem = ResolveWaterSurfaceSample(
+        false, true, true, &CompleteQuery, LastValid, 15.0);
+    TestEqual(TEXT("missing subsystem invalid component"),
+        MissingSubsystem.State, EShipWaterState::ComponentInvalid);
+    const FShipSurfaceSample MissingComponent = ResolveWaterSurfaceSample(
+        true, false, true, &CompleteQuery, LastValid, 15.0);
+    TestEqual(TEXT("missing component invalid"),
+        MissingComponent.State, EShipWaterState::ComponentInvalid);
+
+    const FShipSurfaceSample FirstFailure = ResolveWaterSurfaceSample(
+        false, false, false, nullptr, TOptional<FShipSurfaceSample>(), 42.0);
+    TestEqual(TEXT("first failure keeps actor Z"), FirstFailure.SurfaceZ, 42.0);
+    TestTrue(TEXT("first failure uses world up"),
+        FirstFailure.Normal.Equals(FVector::UpVector, 1e-6));
+    TestTrue(TEXT("first failure marks fallback"), FirstFailure.bUsedFallback);
+
+    return !HasAnyErrors();
+}
+
+bool FShipSurfaceBasisTest::RunTest(const FString&)
+{
+    const auto TestBasis = [this](
+        const TCHAR* Label,
+        double ExpectedYawDegrees,
+        const FShipSurfaceBasis& Basis)
+    {
+        const double ActualYawDegrees = FMath::RadiansToDegrees(
+            FMath::Atan2(Basis.Forward.Y, Basis.Forward.X));
+        TestTrue(
+            *FString::Printf(TEXT("%s preserves yaw"), Label),
+            FMath::Abs(FRotator::NormalizeAxis(
+                ActualYawDegrees - ExpectedYawDegrees)) <= 0.01);
+        TestTrue(
+            *FString::Printf(TEXT("%s forward unit"), Label),
+            FMath::Abs(Basis.Forward.Size() - 1.0) <= 1e-5);
+        TestTrue(
+            *FString::Printf(TEXT("%s right unit"), Label),
+            FMath::Abs(Basis.Right.Size() - 1.0) <= 1e-5);
+        TestTrue(
+            *FString::Printf(TEXT("%s up unit"), Label),
+            FMath::Abs(Basis.Up.Size() - 1.0) <= 1e-5);
+        TestTrue(
+            *FString::Printf(TEXT("%s forward right orthogonal"), Label),
+            FMath::Abs(FVector::DotProduct(Basis.Forward, Basis.Right)) <= 1e-5);
+        TestTrue(
+            *FString::Printf(TEXT("%s forward up orthogonal"), Label),
+            FMath::Abs(FVector::DotProduct(Basis.Forward, Basis.Up)) <= 1e-5);
+        TestTrue(
+            *FString::Printf(TEXT("%s right up orthogonal"), Label),
+            FMath::Abs(FVector::DotProduct(Basis.Right, Basis.Up)) <= 1e-5);
+        TestTrue(
+            *FString::Printf(TEXT("%s right handed"), Label),
+            FVector::DotProduct(
+                FVector::CrossProduct(Basis.Forward, Basis.Right), Basis.Up) >=
+                0.99999);
+    };
+
+    const FShipSurfaceBasis ZeroYaw = BuildShipSurfaceBasis(
+        0.0,
+        FVector(1.0, 1.0, 1.0).GetSafeNormal(),
+        TOptional<FVector>());
+    TestFalse(TEXT("valid zero-yaw normal does not fallback"),
+        ZeroYaw.bUsedFallback);
+    TestBasis(TEXT("zero yaw slope"), 0.0, ZeroYaw);
+
+    const FShipSurfaceBasis FortyFiveYaw = BuildShipSurfaceBasis(
+        45.0,
+        FVector(0.0, 1.0, 1.0).GetSafeNormal(),
+        TOptional<FVector>());
+    TestFalse(TEXT("valid forty-five normal does not fallback"),
+        FortyFiveYaw.bUsedFallback);
+    TestBasis(TEXT("forty-five yaw slope"), 45.0, FortyFiveYaw);
+
+    const FVector LastValidNormal = FVector(0.0, 1.0, 1.0).GetSafeNormal();
+    const FShipSurfaceBasis LowNormalFallback = BuildShipSurfaceBasis(
+        30.0, FVector(1.0, 0.0, 0.05), LastValidNormal);
+    TestTrue(TEXT("low normal uses fallback"), LowNormalFallback.bUsedFallback);
+    TestTrue(TEXT("low normal uses last valid normal"),
+        LowNormalFallback.Up.Equals(LastValidNormal, 1e-5));
+    TestBasis(TEXT("low normal fallback"), 30.0, LowNormalFallback);
+
+    const FShipSurfaceBasis ZeroFallback = BuildShipSurfaceBasis(
+        -20.0, FVector::ZeroVector, TOptional<FVector>());
+    TestTrue(TEXT("zero normal uses fallback"), ZeroFallback.bUsedFallback);
+    TestTrue(TEXT("zero normal uses world up"),
+        ZeroFallback.Up.Equals(FVector::UpVector, 1e-5));
+    TestBasis(TEXT("zero normal fallback"), -20.0, ZeroFallback);
+
+    const FShipSurfaceBasis NonFiniteFallback = BuildShipSurfaceBasis(
+        75.0,
+        FVector(std::numeric_limits<double>::quiet_NaN(), 0.0, 1.0),
+        LastValidNormal);
+    TestTrue(TEXT("non-finite normal uses fallback"),
+        NonFiniteFallback.bUsedFallback);
+    TestTrue(TEXT("non-finite fallback finite"),
+        FMath::IsFinite(NonFiniteFallback.Forward.X) &&
+        FMath::IsFinite(NonFiniteFallback.Forward.Y) &&
+        FMath::IsFinite(NonFiniteFallback.Forward.Z) &&
+        FMath::IsFinite(NonFiniteFallback.Right.X) &&
+        FMath::IsFinite(NonFiniteFallback.Right.Y) &&
+        FMath::IsFinite(NonFiniteFallback.Right.Z) &&
+        FMath::IsFinite(NonFiniteFallback.Up.X) &&
+        FMath::IsFinite(NonFiniteFallback.Up.Y) &&
+        FMath::IsFinite(NonFiniteFallback.Up.Z));
+    TestBasis(TEXT("non-finite normal fallback"), 75.0, NonFiniteFallback);
+
+    return !HasAnyErrors();
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
