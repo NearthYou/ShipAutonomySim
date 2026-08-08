@@ -34,7 +34,7 @@
 ```powershell
 $ErrorActionPreference = 'Stop'
 $ExpectedBranch = 'feat/ship-autonomy-navigation'
-$ExpectedHead = '54273859e55b1f302c0c3f1626be7de6a0cc6f9d'
+$ExpectedHead = '5bb13544cde567be17179b2c0b6bddd4ff98c26c'
 $ActualBranch = git branch --show-current
 $ActualHead = git rev-parse HEAD
 $Porcelain = @(git status --porcelain=v1)
@@ -44,7 +44,7 @@ if ($ActualBranch -ne $ExpectedBranch -or $ActualHead -ne $ExpectedHead -or $Por
 }
 ```
 
-예상 출력 조건은 branch `feat/ship-autonomy-navigation`, HEAD `54273859e55b1f302c0c3f1626be7de6a0cc6f9d`, 변경 0, UnrealEditor 계열 process 0이다. 최초 Task commit 뒤에는 고정 HEAD 비교 대신 직전 Task commit SHA를 기록하고 branch, clean, process 조건을 계속 확인한다.
+예상 출력 조건은 branch `feat/ship-autonomy-navigation`, HEAD `5bb13544cde567be17179b2c0b6bddd4ff98c26c`, 변경 0, UnrealEditor 계열 process 0이다. 계획 파일은 이 HEAD에 이미 추적된 상태여야 하며 `git ls-files --error-unmatch -- docs/superpowers/plans/2026-08-09-ship-autonomy-navigation.md`로 확인한다. 최초 Task commit 뒤에는 고정 HEAD 비교 대신 직전 Task commit SHA를 기록하고 branch, clean, process 조건을 계속 확인한다.
 
 ## 변경 파일 구조 고정
 
@@ -78,7 +78,6 @@ Test only, no modification expected
 ShipAutonomySim/Source/ShipAutonomySim/ShipAutonomySim.Build.cs
 ShipAutonomySim/Content/Maps/MainLevel.umap
 ShipAutonomySim/Config/DefaultEngine.ini
-ShipAutonomySim/Config/DefaultGame.ini
 ShipAutonomySim/Config/DefaultInput.ini
 ```
 
@@ -96,6 +95,8 @@ ShipAutonomySim/Config/DefaultInput.ini
 ### Public navigation types
 
 `ShipNavigationTypes.h`가 run, setup, runtime error type의 단일 소유자다. terminal enum에는 네 값만 둔다.
+
+모든 새 `UCLASS`와 `USTRUCT` public header는 자체 header include를 먼저 두고 필요한 include를 이어 붙인 뒤 해당 파일의 `.generated.h`를 마지막 include로 둔다. `.generated.h` 뒤에는 다른 include를 추가하지 않는다.
 
 ```cpp
 #pragma once
@@ -121,6 +122,7 @@ enum class EShipSetupFailure : uint8
     SlideOptionNonFinite,
     SlideOptionOutOfRange,
     WaterSurfaceUnavailable,
+    WaterLocationExcluded,
     CourseSpawnFailed,
     MeshLoadFailed,
     ShipSpawnFailed,
@@ -148,16 +150,20 @@ enum class EShipRuntimeCalculationError : uint8
 double GetSignedSpeedCmPerSecond() const;
 bool ConsumeBlockingHit(FHitResult& OutHit);
 
-// ShipPawn.h
+// ShipPawn.h, Task 5 private boundary
+void LockManualInputForAutonomy();
+
+// ShipPawn.h, Task 7 public boundary
 bool EnterAutonomy(
     const TArray<FVector>& WorldPath,
     AStaticMeshActor* ActualWall,
     ASimGameMode* RunOwner);
+UShipNavigator* GetNavigator() const;
 ```
 
-`GetSignedSpeedCmPerSecond`는 저장된 signed speed의 read-only 복사만 반환한다. `ConsumeBlockingHit`는 마지막 swept blocking `FHitResult`의 actor와 component identity를 보존하고 소비 뒤에만 pending flag를 지운다. `EnterAutonomy`는 manual latch를 false로 만들고 mapping을 제거한 뒤 두 입력을 0으로 만들고 Navigator를 configure하고 enable하는 유일한 전환 경계다.
+`GetSignedSpeedCmPerSecond`는 저장된 signed speed의 read-only 복사만 반환한다. `ConsumeBlockingHit`는 마지막 swept blocking `FHitResult`의 actor와 component identity를 보존하고 소비 뒤에만 pending flag를 지운다. Task 5의 private `LockManualInputForAutonomy`는 latch, mapping 제거, 두 입력의 safety zero까지만 구현한다. Task 7에서 Navigator API를 선언한 뒤 `EnterAutonomy`가 이 private 경계를 호출하고 Navigator를 configure하고 enable하는 유일한 public 전환 경계가 된다.
 
-`EnterAutonomy`는 `bManualInputActive=false`를 먼저 latch하고 manual mapping을 제거한 뒤 throttle과 steer의 남은 값을 0으로 만든다. 모든 manual axis, `Triggered`, `Completed`, `Canceled` handler는 이 latch가 false면 return한다. 따라서 이미 input queue에 들어온 release event도 Navigator가 이후 쓴 command를 0으로 덮지 못한다. autonomy를 다시 manual로 되돌리는 public 경계는 추가하지 않는다.
+`LockManualInputForAutonomy`는 `bAutonomyInputLocked=true`를 가장 먼저 latch하고 `DeactivateManualInput`으로 `bManualInputActive=false`, manual mapping 제거, throttle과 steer의 남은 값 0을 만든다. 모든 manual axis, `Triggered`, `Completed`, `Canceled` handler는 test-only callback counter를 먼저 증가시켜 event 도착을 관찰하게 한 뒤 `bAutonomyInputLocked || !bManualInputActive`이면 실제 `UShipMovement` input write 전에 return한다. 따라서 이미 input queue에 들어온 release event도 Navigator가 이후 쓴 command를 0으로 덮지 못한다. autonomy를 다시 manual로 되돌리는 public 경계는 추가하지 않는다.
 
 ### CourseBuilder boundary
 
@@ -168,6 +174,7 @@ struct FShipCourseBuildResult
     ATargetPoint* StartTarget = nullptr;
     ATargetPoint* EndTarget = nullptr;
     AStaticMeshActor* WallActor = nullptr;
+    int32 RandomSeed = 0;
     double SlideCm = 0.0;
     double WaterSurfaceZCm = 0.0;
 };
@@ -182,10 +189,11 @@ ATargetPoint* GetStartTarget() const;
 ATargetPoint* GetEndTarget() const;
 AStaticMeshActor* GetWallActor() const;
 const TArray<FVector>& GetWorldPath() const;
+int32 GetResolvedRandomSeed() const;
 double GetResolvedSlideCm() const;
 ```
 
-`SetForcedSlideCm`는 검증된 `[-500, 500]` 값만 받는다. absent option만 `ClearForcedSlide` 경로로 들어가며 이때 `FRandomStream RandomStream(RandomSeed)`의 `FRandRange(-500.0, 500.0)`을 사용한다. invalid present option은 builder를 호출하지 않는다.
+`SetForcedSlideCm`는 검증된 `[-500, 500]` 값만 받는다. forced option이면 `RandomSeed=0`으로 저장하고 random API를 호출하지 않는다. absent option만 `ClearForcedSlide` 경로로 들어가며 `FRandomStream RandomStream(NAME_None)`을 생성하고 `GetInitialSeed()`를 `ResolvedRandomSeed`에 저장한 뒤 `FRandRange(-500.0, 500.0)`으로 실제 slide를 한 번 뽑는다. 설치된 5.5.4의 `Initialize(FName)`는 `NAME_None`일 때 `FPlatformTime::Cycles()`를 seed로 쓰므로 일반 Play마다 시간 기반 seed가 달라진다. seed와 실제 slide는 build result에 저장하고 `Stage4RandomCourse seed=%d slide=%.3f`를 run당 한 번 로그한다. invalid present option은 builder와 random 경로를 호출하지 않는다.
 
 ### Navigator boundary
 
@@ -200,6 +208,37 @@ bool IsNavigationEnabled() const;
 ```
 
 `Configure` 성공 시 `InMovement->AddTickPrerequisiteComponent(this)`를 호출해 Navigator tick이 Movement tick보다 먼저 끝나게 한다. Navigator는 `SetThrottle`, `SetSteer`, read-only speed 외의 Movement 내부 상태와 actor transform mutator를 사용하지 않는다.
+
+Navigator의 장기 참조와 기본 튜닝값은 다음 ownership으로 고정한다. same-owner default component인 Movement는 strong object reference를 쓰고 world가 소유하는 wall과 GameMode는 weak reference를 쓴다.
+
+```cpp
+UPROPERTY(Transient)
+TObjectPtr<UShipMovement> Movement;
+
+UPROPERTY(Transient)
+TWeakObjectPtr<AStaticMeshActor> ActualWall;
+
+UPROPERTY(Transient)
+TWeakObjectPtr<ASimGameMode> RunOwner;
+
+UPROPERTY(EditAnywhere, Category = "Navigation|Guidance")
+double LookaheadDistanceCm = 300.0;
+
+UPROPERTY(EditAnywhere, Category = "Navigation|Guidance")
+double HeadingFullSteerDegrees = 30.0;
+
+UPROPERTY(EditAnywhere, Category = "Navigation|Throttle")
+double FullThrottleHeadingDegrees = 20.0;
+
+UPROPERTY(EditAnywhere, Category = "Navigation|Throttle")
+double MinimumThrottleHeadingDegrees = 60.0;
+
+UPROPERTY(EditAnywhere, Category = "Navigation|Throttle")
+double MinimumThrottle = 0.35;
+
+UPROPERTY(EditAnywhere, Category = "Navigation|Stopping")
+double CoastMarginCm = 25.0;
+```
 
 ### GameMode boundary
 
@@ -226,6 +265,31 @@ UPrimitiveComponent* GetCollisionComponent() const;
 
 `ASimGameMode::AddTickPrerequisiteComponent(ShipMovement)`로 Movement 뒤에 GameMode terminal 평가를 둔다. 최종 tick 순서는 Navigator, Movement, GameMode다.
 
+GameMode는 이번 run을 의도적으로 유지하는 ship과 builder에 strong transient reference를, 충돌 관찰 identity에는 weak transient reference를 쓴다. getter는 각 pointer의 `.Get()` 결과를 반환한다. timeout과 성공 임계값은 설계 기본값을 가진 편집 가능 property로 둔다.
+
+```cpp
+UPROPERTY(Transient)
+TObjectPtr<AShipPawn> RunShip;
+
+UPROPERTY(Transient)
+TObjectPtr<ACourseBuilder> CourseBuilder;
+
+UPROPERTY(Transient)
+TWeakObjectPtr<AActor> CollisionActor;
+
+UPROPERTY(Transient)
+TWeakObjectPtr<UPrimitiveComponent> CollisionComponent;
+
+UPROPERTY(EditAnywhere, Category = "Autonomy|Terminal")
+double TimeoutSeconds = 45.0;
+
+UPROPERTY(EditAnywhere, Category = "Autonomy|Terminal")
+double GoalRadiusCm = 100.0;
+
+UPROPERTY(EditAnywhere, Category = "Autonomy|Terminal")
+double SuccessSpeedThresholdCmPerSecond = 5.0;
+```
+
 ## UE 5.5.4 API와 lifecycle 근거
 
 기억이 아니라 설치된 `C:\Program Files\Epic Games\UE_5.5\Engine`의 5.5.4 source에서 확인한 근거다.
@@ -239,8 +303,9 @@ UPrimitiveComponent* GetCollisionComponent() const;
 | deferred finish | `void FinishSpawning(const FTransform&, bool, const FComponentInstanceDataCache*, ESpawnActorScaleMethod)` | `Engine/Source/Runtime/Engine/Classes/GameFramework/Actor.h:3024` |
 | mesh load와 설정 | `LoadObject<T>(UObject*, const TCHAR*, const TCHAR*, uint32, UPackageMap*, const FLinkerInstancingContext*)`; `virtual bool SetStaticMesh(UStaticMesh*)` | `Engine/Source/Runtime/CoreUObject/Public/UObject/UObjectGlobals.h:1989`; `Engine/Source/Runtime/Engine/Classes/Components/StaticMeshComponent.h:414` |
 | collision | `SetCollisionEnabled`, `SetCollisionObjectType`, `SetCollisionResponseToAllChannels`, `SetCollisionResponseToChannel` | `Engine/Source/Runtime/Engine/Classes/Components/PrimitiveComponent.h:1892`, `:1913`, `:2814`, `:2822` |
-| random | `FRandomStream(int32)`, `Initialize(int32)`, `GetInitialSeed()`, `FRandRange(FVector::FReal, FVector::FReal)` | `Engine/Source/Runtime/Core/Public/Math/RandomStream.h:40`, `:63`, `:209` |
-| water | `UWaterSubsystem::GetWaterSubsystem(const UWorld*)`, `TWeakObjectPtr<UWaterBodyComponent> GetOceanBodyComponent()`, `UWaterBodyComponent::QueryWaterInfoClosestToWorldLocation` | `Engine/Plugins/Experimental/Water/Source/Runtime/Public/WaterSubsystem.h:99`, `:109`; `WaterBodyComponent.h:306` |
+| random | `FRandomStream(FName)`과 `Initialize(FName)`에서 `NAME_None`은 `FPlatformTime::Cycles()` 사용, `GetInitialSeed()`, `FRandRange(FVector::FReal, FVector::FReal)` | `Engine/Source/Runtime/Core/Public/Math/RandomStream.h:48-53`, `:75-86`, `:97-99`, `:209` |
+| water | `UWaterSubsystem::GetWaterSubsystem(const UWorld*)`, `TWeakObjectPtr<UWaterBodyComponent> GetOceanBodyComponent()`, `UWaterBodyComponent::QueryWaterInfoClosestToWorldLocation`, `FWaterBodyQueryResult::IsInExclusionVolume() const` | `Engine/Plugins/Experimental/Water/Source/Runtime/Public/WaterSubsystem.h:99`, `:109`; `WaterBodyComponent.h:306`; `WaterBodyTypes.h:91` |
+| expected error | `void AddExpectedError(FString, EAutomationExpectedErrorFlags::MatchType, int32 Occurrences = 1, bool IsRegex = true)` | `Engine/Source/Runtime/Core/Public/Misc/AutomationTest.h:1799` |
 | debug | `DrawDebugLine`, `DrawDebugPoint`, `DrawDebugBox` | `Engine/Source/Runtime/Engine/Public/DrawDebugHelpers.h:22`, `:24`, `:30` |
 | tick ordering | `UActorComponent::AddTickPrerequisiteActor(AActor*)`, `AddTickPrerequisiteComponent(UActorComponent*)` | `Engine/Source/Runtime/Engine/Classes/Components/ActorComponent.h:1135`, `:1139` |
 | latent command | `IAutomationLatentCommand::Update()`와 `ADD_LATENT_AUTOMATION_COMMAND` | `Engine/Source/Runtime/Core/Public/Misc/AutomationTest.h` |
@@ -401,6 +466,7 @@ Stage 4가 추가할 이름은 다음 20개다.
 - [ ] 4분: `ShipAutonomySim/SETUP.md`에서 MainLevel 생성 안내를 현재 MainLevel 사용 안내로 바꾸고 Stage 3 수동 이동과 Stage 4 자동 운항의 책임을 짧게 구분한다.
 - [ ] 3분: 루트 `README.md`에 static viewer와 별도의 `ShipAutonomySim` Unreal 과제 경로 및 현재 Stage 경계를 한 문단으로 추가한다.
 - [ ] 2분: 같은 문서 assertion을 GREEN으로 다시 실행한다. 예상 결과는 3개 assertion 통과와 `STALE_STAGE_BOUNDARY` 0회다.
+- [ ] 2분: 문서-only 회귀 gate로 기존 Stage 3 test 이름 12개가 `ShipMovementTests.cpp`에 그대로 있고 `git diff --name-only -- ShipAutonomySim/Source ShipAutonomySim/Config ShipAutonomySim/Content` 출력이 비어 있는지 확인한다.
 - [ ] 3분: `git diff -- README.md ShipAutonomySim/AGENTS.md ShipAutonomySim/SETUP.md`로 문서 전체 재작성, 구현 완료 주장, 범위 확대가 없는지 확인한다.
 - [ ] 2분: `git diff --check`와 `git status --short`를 실행하고 변경 경로가 세 문서뿐인지 확인한다.
 - [ ] 3분: 아래 제목과 세 구획 본문으로 commit한다.
@@ -475,11 +541,12 @@ struct FShipCourseDefinition
 - [ ] 3분: option RED를 실행한다. Stage 3 12개와 새 unit 3개 중 compile 또는 새 test 실패가 예상되며 실패 이름은 `Options.Classification`, `Course.Geometry`, `Course.FrameTransform`다. 구현 전 예상 full count는 15개다.
 
 ```powershell
+$Log = 'C:\Users\siwon\Documents\Codex\2026-08-07\krafton-web-viewer\work\image-sequence-viewer\ShipAutonomySim\Saved\Logs\Stage4-Task2-RED.log'
 & 'C:\Program Files\Epic Games\UE_5.5\Engine\Binaries\Win64\UnrealEditor-Cmd.exe' `
   'C:\Users\siwon\Documents\Codex\2026-08-07\krafton-web-viewer\work\image-sequence-viewer\ShipAutonomySim\ShipAutonomySim.uproject' `
   -Unattended -NoSplash -NullRHI -NoAudio -NoPause -NoP4 -nowrite -TestExit='Automation Test Queue Empty' `
   -ExecCmds='Automation RunTests ShipAutonomySim.ShipNavigation.Unit;SoftQuit;' `
-  -Log='C:\Users\siwon\Documents\Codex\2026-08-07\krafton-web-viewer\work\image-sequence-viewer\ShipAutonomySim\Saved\Logs\Stage4-Task2-RED.log'
+  "-abslog=$Log"
 ```
 
 - [ ] 4분: `ShipNavigationTypes.h`에 고정한 네 terminal 값, setup failure, runtime error enum을 정확히 추가한다.
@@ -595,6 +662,10 @@ bool ComputeGuidanceCommands(
     const FVector& ShipForward,
     const FVector& ShipLocation,
     const FVector& LookaheadTarget,
+    double HeadingFullSteerDegrees,
+    double FullThrottleHeadingDegrees,
+    double MinimumThrottleHeadingDegrees,
+    double MinimumThrottle,
     double& OutHeadingErrorDegrees,
     float& OutSteer,
     float& OutThrottle);
@@ -621,7 +692,7 @@ struct FShipPathProgress
 - [ ] 4분: active segment 투영이 이전 progress보다 감소하지 않는 test와 ship이 future segment에 더 가까워도 jump하지 않는 test를 먼저 추가한다.
 - [ ] 3분: segment endpoint를 넘은 한 tick에 active index가 정확히 1만 증가하고 다음 segment 투영은 다음 tick에 수행되는 RED case를 추가한다.
 - [ ] 4분: lookahead가 현재 progress부터 polyline을 따라 300 cm 전진하고 final endpoint에서 clamp되는 RED case를 추가한다.
-- [ ] 4분: +X heading에서 +Y 쪽 target이 positive yaw와 positive steer를 만드는지, heading error `30`도에서 steer `1`, `-30`도에서 `-1`, throttle은 `20`도 이하 `1`, `60`도 이상 `0.35`, 중간 선형 보간을 검증한다.
+- [ ] 4분: +X heading에서 +Y 쪽 target이 positive yaw와 positive steer를 만드는지, 기본 tuning을 인자로 넘겼을 때 heading error `30`도에서 steer `1`, `-30`도에서 `-1`, throttle은 `20`도 이하 `1`, `60`도 이상 `0.35`, 중간 선형 보간을 검증한다.
 - [ ] 4분: Stage 3 C1과 C2 parameter에서 `1/120` second forward Euler와 stop speed `5`를 사용하는 dynamic stop test를 작성하고 non-finite, 음수, 비감속 step이 실패하는 case를 추가한다.
 - [ ] 3분: RED를 `ShipAutonomySim.ShipNavigation.Unit.Guidance` prefix로 실행한다. 예상 새 실패 이름은 위 5개이며 구현 전 Editor full count는 20개다.
 - [ ] 5분: XY active segment projection을 구현하고 projection fraction과 누적 distance를 clamp한 뒤 `max(previous, candidate)`를 적용한다.
@@ -654,22 +725,24 @@ OutProgress.MonotonicDistanceCm = FMath::Max(Previous.MonotonicDistanceCm, Candi
 
 - [ ] 4분: `dot(ShipXY - SegmentEnd, SegmentDirection) >= 0`이면 current segment 끝 누적 길이를 progress에 반영하고 active index를 한 번만 올린다. 같은 호출에서 새 segment를 다시 투영하지 않는다.
 - [ ] 5분: current progress에서 남은 segment 길이를 순서대로 소비해 300 cm lookahead를 만들고 endpoint 이후 final path point를 반환한다.
-- [ ] 4분: `Atan2(cross, dot)`로 signed heading error를 계산하고 `Steer=Clamp(error/30,-1,1)`을 구현한다.
-- [ ] 3분: absolute heading error에 대해 throttle piecewise curve를 구현한다.
+- [ ] 4분: `Atan2(cross, dot)`로 signed heading error를 계산하고 `Steer=Clamp(error/HeadingFullSteerDegrees,-1,1)`을 구현한다. 네 tuning input은 finite이고 heading threshold는 양수이며 throttle threshold가 오름차순이고 minimum throttle이 `[0,1]`인지 검증한다.
+- [ ] 3분: absolute heading error와 함수 인자로 받은 throttle tuning에 대해 piecewise curve를 구현한다.
 
 ```cpp
 const double AbsError = FMath::Abs(OutHeadingErrorDegrees);
-if (AbsError <= 20.0)
+if (AbsError <= FullThrottleHeadingDegrees)
 {
     OutThrottle = 1.0f;
 }
-else if (AbsError >= 60.0)
+else if (AbsError >= MinimumThrottleHeadingDegrees)
 {
-    OutThrottle = 0.35f;
+    OutThrottle = static_cast<float>(MinimumThrottle);
 }
 else
 {
-    OutThrottle = static_cast<float>(FMath::Lerp(1.0, 0.35, (AbsError - 20.0) / 40.0));
+    const double Alpha = (AbsError - FullThrottleHeadingDegrees)
+        / (MinimumThrottleHeadingDegrees - FullThrottleHeadingDegrees);
+    OutThrottle = static_cast<float>(FMath::Lerp(1.0, MinimumThrottle, Alpha));
 }
 ```
 
@@ -847,45 +920,42 @@ git commit -m "feat: 충돌 간격과 종료 판정 계산 추가" `
   -m "검증 방법`nGeometry 및 Terminal unit test와 Editor 회귀"
 ```
 
-### Task 5: Movement read-only hit identity와 Pawn EnterAutonomy 경계 추가
+### Task 5: Movement read-only hit identity와 Pawn autonomy input latch 추가
 
 #### Files
 - Modify: `ShipAutonomySim/Source/ShipAutonomySim/Public/ShipMovement.h`의 public query와 pending hit state
 - Modify: `ShipAutonomySim/Source/ShipAutonomySim/Private/ShipMovement.cpp`의 swept hit 보존과 consume 구현
-- Modify: `ShipAutonomySim/Source/ShipAutonomySim/Public/ShipPawn.h`의 Navigator component와 `EnterAutonomy`
-- Modify: `ShipAutonomySim/Source/ShipAutonomySim/Private/ShipPawn.cpp`의 component 생성과 안전한 manual input 해제
+- Modify: `ShipAutonomySim/Source/ShipAutonomySim/Public/ShipPawn.h`의 private autonomy latch와 test accessor
+- Modify: `ShipAutonomySim/Source/ShipAutonomySim/Private/ShipPawn.cpp`의 안전한 manual input 해제와 handler guard
 - Modify: `ShipAutonomySim/Source/ShipAutonomySim/Private/Tests/ShipMovementTests.cpp`의 Stage 4 경계와 transform ownership assertion
 - Test: `ShipAutonomySim.ShipNavigation.Unit.Movement.BlockingHitIdentity`
-- Test: `ShipAutonomySim.ShipNavigation.Unit.Pawn.AutoStartRemovesManualMapping`
 - Test: `ShipAutonomySim.ShipNavigation.Unit.Pawn.StaleManualEventsIgnored`
 - Test: `ShipAutonomySim.ShipNavigation.Unit.Pawn.DirectManualInputIgnoredDuringAutonomy`
 - Test: 기존 `ShipAutonomySim.ShipMovement.Runtime.TransformOwnership`
+- Test: 기존 `ShipAutonomySim.ShipMovement.Pawn.FocusLossAndAutopilotGuard`
 
 #### Consumes
 
-Stage 3 `SignedSpeedCmPerSecond`, swept movement의 blocking `FHitResult`, 기존 `DeactivateManualInput()`, 3점 world path, actual wall actor, run owner
+Stage 3 `SignedSpeedCmPerSecond`, swept movement의 blocking `FHitResult`, 기존 `DeactivateManualInput()`, manual callback과 test-only callback counter
 
 ```cpp
 double UShipMovement::GetSignedSpeedCmPerSecond() const;
 bool UShipMovement::ConsumeBlockingHit(FHitResult& OutHit);
-bool AShipPawn::EnterAutonomy(
-    const TArray<FVector>& WorldPath,
-    AStaticMeshActor* ActualWall,
-    ASimGameMode* RunOwner);
+void AShipPawn::LockManualInputForAutonomy();
 ```
 
 #### Produces
 
-transform authority를 추가하지 않는 signed speed copy, actual blocking actor와 component identity를 한 번 소비할 수 있는 signal, manual mapping과 두 input을 안전하게 제거하고 Navigator를 enable하는 단일 transition, autonomy 뒤 모든 stale 및 direct manual event 무효화
+transform authority를 추가하지 않는 signed speed copy, actual blocking actor와 component identity를 한 번 소비할 수 있는 signal, manual mapping과 두 input을 안전하게 제거하는 private latch, autonomy 뒤 모든 stale 및 direct manual event 무효화. 이 Task는 `UShipNavigator` type이나 API를 참조하지 않는다.
 
 - [ ] 4분: Movement test accessor로 signed speed를 설정하고 getter가 같은 값을 반환하되 외부에서 수정할 reference를 주지 않는 compile-time와 runtime assertion을 추가한다.
 - [ ] 4분: blocking hit actor와 component를 채운 `FHitResult`를 pending state에 넣고 첫 consume은 true와 identity 보존, 두 번째 consume은 false가 되는 RED test를 추가한다.
-- [ ] 4분: `Pawn.AutoStartRemovesManualMapping`에 active manual mapping과 non-zero throttle과 steer 상태를 준비한 뒤 `EnterAutonomy`가 같은 call 안에서 manual latch false, mapping 제거, 입력 0, Navigator enable을 만드는 RED assertion을 추가한다.
-- [ ] 4분: `Pawn.StaleManualEventsIgnored`에서 Navigator가 non-zero command를 쓴 뒤 throttle과 steer의 늦은 `Completed` 및 `Canceled` handler를 test accessor로 직접 호출하고 command가 바뀌지 않는 RED assertion을 추가한다.
-- [ ] 4분: `Pawn.DirectManualInputIgnoredDuringAutonomy`에서 autonomy 뒤 W, S, A, D에 해당하는 forward와 turn handler를 직접 호출하고 Navigator command와 actor transform이 바뀌지 않는 RED assertion을 추가한다.
-- [ ] 3분: `EnterAutonomy` configure failure에서도 입력이 0이고 manual mapping이 다시 생기지 않는 safe failure case를 `AutoStartRemovesManualMapping`에 추가한다.
+- [ ] 4분: `Pawn.StaleManualEventsIgnored`에서 test accessor로 private latch를 호출한 뒤 Movement에 non-zero 자율 command를 직접 쓰고 throttle과 steer의 늦은 `Completed` 및 `Canceled` handler를 호출한다. 네 test-only counter는 각각 1 증가하지만 command는 바뀌지 않는 RED assertion을 추가한다.
+- [ ] 4분: `Pawn.DirectManualInputIgnoredDuringAutonomy`에서 private latch 뒤 W, S, A, D에 해당하는 forward와 turn handler를 직접 호출하고 Movement command와 actor transform이 바뀌지 않는 RED assertion을 추가한다.
 - [ ] 3분: 기존 transform ownership test를 확장해 `ShipNavigator.cpp`, `CourseBuilder.cpp`, `SimGameMode.cpp`, `ShipPawn.cpp`에서 actor transform mutator가 0회이고 Stage 3 swept `SetActorLocationAndRotation`만 1회인지 검사한다.
-- [ ] 3분: targeted RED를 실행한다. 예상 새 실패는 `Movement.BlockingHitIdentity`, `Pawn.AutoStartRemovesManualMapping`, `Pawn.StaleManualEventsIgnored`, `Pawn.DirectManualInputIgnoredDuringAutonomy`이며 기존 transform ownership도 새 source가 생기기 전 deny-list assertion 때문에 RED가 될 수 있다. Editor full 예상 발견 수는 27개다.
+- [ ] 3분: 기존 `FocusLossAndAutopilotGuard` assertion을 유지한다. queued release callback counter는 도착 관찰을 위해 증가하고 private latch 뒤 Movement에 쓴 throttle `0.65`와 steer `-0.25`는 보존되어야 한다.
+- [ ] 2분: 기존 `FShipPawnTestAccessor::DeactivateForAutopilot`은 삭제하지 않고 내부 호출만 `LockManualInputForAutonomy()`로 바꿔 기존 test가 실제 새 latch를 통과하게 한다.
+- [ ] 3분: targeted RED를 실행한다. 예상 새 실패는 `Movement.BlockingHitIdentity`, `Pawn.StaleManualEventsIgnored`, `Pawn.DirectManualInputIgnoredDuringAutonomy`이며 기존 transform ownership도 새 source가 생기기 전 deny-list assertion 때문에 RED가 될 수 있다. Editor full 예상 발견 수는 26개다.
 - [ ] 3분: `ShipMovement.h`에 `Engine/HitResult.h`를 include하고 public getter와 consume declaration, private `FHitResult PendingBlockingHit`와 `bool bHasPendingBlockingHit`를 추가한다.
 - [ ] 3분: getter와 consume을 값 복사 semantics로 구현한다.
 
@@ -910,41 +980,41 @@ bool UShipMovement::ConsumeBlockingHit(FHitResult& OutHit)
 ```
 
 - [ ] 3분: swept blocking hit 분기에서 `PendingBlockingHit = Hit`와 flag true를 기록한다. tick 시작에서 pending state를 지우지 않고 consume할 때만 지운다.
-- [ ] 3분: `ShipPawn` constructor에서 `UShipNavigator` default subobject를 만들고 `UPROPERTY(VisibleAnywhere)` pointer를 보관한다.
-- [ ] 4분: `EnterAutonomy` 시작에 `bManualInputActive=false`를 먼저 latch하고 `DeactivateManualInput()`으로 mapping을 제거한 뒤 `SetThrottle(0)`, `SetSteer(0)`을 쓴다. 전환 중 도착한 event가 zero write 뒤 다시 command를 바꾸지 못하게 한다.
-- [ ] 4분: null dependency나 Navigator configure 실패면 false를 반환하고 입력 0을 다시 보장한다. 성공일 때만 `SetNavigationEnabled(true)` 후 true를 반환한다.
+- [ ] 3분: Pawn private state에 `bool bAutonomyInputLocked = false`와 `void LockManualInputForAutonomy()`를 추가한다. 이 Task에서는 Navigator declaration, component, configure call을 추가하지 않는다.
+- [ ] 4분: private latch에서 `bAutonomyInputLocked=true`를 먼저 쓰고 `DeactivateManualInput()`으로 mapping을 제거한 뒤 Movement가 있으면 `SetThrottle(0)`과 `SetSteer(0)`을 쓴다.
 
 ```cpp
-bool AShipPawn::EnterAutonomy(const TArray<FVector>& WorldPath, AStaticMeshActor* ActualWall, ASimGameMode* RunOwner)
+void AShipPawn::LockManualInputForAutonomy()
 {
+    bAutonomyInputLocked = true;
     DeactivateManualInput();
-    if (Movement == nullptr)
+    if (ShipMovement != nullptr)
     {
-        return false;
+        ShipMovement->SetThrottle(0.0f);
+        ShipMovement->SetSteer(0.0f);
     }
-    Movement->SetThrottle(0.0f);
-    Movement->SetSteer(0.0f);
-    if (Navigator == nullptr || ActualWall == nullptr || RunOwner == nullptr)
-    {
-        Movement->SetThrottle(0.0f);
-        Movement->SetSteer(0.0f);
-        return false;
-    }
-    if (!Navigator->Configure(WorldPath, Movement, ActualWall, RunOwner))
-    {
-        Movement->SetThrottle(0.0f);
-        Movement->SetSteer(0.0f);
-        return false;
-    }
-    Navigator->SetNavigationEnabled(true);
-    return true;
 }
 ```
 
-- [ ] 2분: release callback의 `bManualInputActive` guard와 focus-loss 입력 해제 경로를 보존해 autonomy 입력을 manual release가 덮지 않는지 확인한다.
-- [ ] 4분: forward와 turn의 `Triggered`, `Completed`, `Canceled` callback 모두 첫 줄에서 `bManualInputActive`를 검사하게 한다. Stage 3 manual mode에서는 기존 동작을 유지하고 autonomy에서는 return한다.
-- [ ] 3분: targeted GREEN에서 새 4개와 기존 transform ownership가 통과하고 Stage 4 unit count가 15인지 확인한다.
-- [ ] 3분: Editor full 회귀에서 기존 12개와 Stage 4 unit 15개, 합계 27개를 확인한다.
+- [ ] 4분: axis handler와 release handler에 `bAutonomyInputLocked || !bManualInputActive` guard를 둔다. `Completed`와 `Canceled` handler는 test-only counter를 먼저 증가시키고 guard 뒤에만 release write를 호출한다.
+
+```cpp
+void AShipPawn::HandleThrottleCompleted()
+{
+#if WITH_DEV_AUTOMATION_TESTS
+    ++TestThrottleCompletedCount;
+#endif
+    if (bAutonomyInputLocked || !bManualInputActive)
+    {
+        return;
+    }
+    HandleThrottleReleased();
+}
+```
+
+- [ ] 2분: 같은 순서를 throttle cancel, steer complete, steer cancel에 적용한다. focus-loss 입력 해제 경로와 Stage 3 manual mode의 실제 Movement write는 유지한다.
+- [ ] 3분: targeted GREEN에서 새 3개와 기존 transform ownership 및 focus-loss guard가 통과하고 Stage 4 unit count가 14인지 확인한다.
+- [ ] 3분: Editor full 회귀에서 기존 12개와 Stage 4 unit 14개, 합계 26개를 확인한다.
 - [ ] 2분: `rg -n "SetActor(Location|Rotation|Transform)|AddActor(World|Local)|TeleportTo|ETeleportType"`로 Movement 외 운항 transform mutator와 teleport가 0인지 확인한다. 기존 Movement의 swept call에 있는 `ETeleportType::None` 한 곳만 허용한다.
 - [ ] 2분: Stage 3 manual input 함수와 기존 input tests가 삭제되지 않았고 toggle key와 console command와 UI와 `ExitAutonomy`가 추가되지 않았는지 diff와 `rg -n`으로 확인한다.
 - [ ] 3분: 아래 commit을 만든다.
@@ -955,9 +1025,9 @@ git add -- ShipAutonomySim/Source/ShipAutonomySim/Public/ShipMovement.h `
   ShipAutonomySim/Source/ShipAutonomySim/Public/ShipPawn.h `
   ShipAutonomySim/Source/ShipAutonomySim/Private/ShipPawn.cpp `
   ShipAutonomySim/Source/ShipAutonomySim/Private/Tests/ShipMovementTests.cpp
-git commit -m "feat: 자율주행 전환 경계 추가" `
+git commit -m "feat: 자율주행 입력 차단 경계 추가" `
   -m "변경 이유`nStage 3 transform 소유권을 보존한 관측 및 입력 전환 경계 필요" `
-  -m "핵심 변경`nsigned speed와 hit identity signal 및 EnterAutonomy 구현" `
+  -m "핵심 변경`nsigned speed와 hit identity signal 및 private autonomy latch 구현" `
   -m "검증 방법`nMovement 및 Pawn unit test와 transform ownership 회귀"
 ```
 
@@ -966,12 +1036,14 @@ git commit -m "feat: 자율주행 전환 경계 추가" `
 #### Files
 - Modify: `ShipAutonomySim/Source/ShipAutonomySim/Public/CourseBuilder.h`의 build result, forced slide, actor reference API
 - Modify: `ShipAutonomySim/Source/ShipAutonomySim/Private/CourseBuilder.cpp`의 water query, random, runtime spawn, collision 설정
+- Modify: `ShipAutonomySim/Source/ShipAutonomySim/Private/ShipNavigationSimulation.h`의 water reference validation helper
+- Modify: `ShipAutonomySim/Source/ShipAutonomySim/Private/ShipNavigationSimulation.cpp`의 exclusion 및 finite 분류
 - Modify: `ShipAutonomySim/Source/ShipAutonomySim/Private/Tests/ShipNavigationTests.cpp`의 runtime setup failure test
 - Test: `ShipAutonomySim.ShipNavigation.Unit.Course.RuntimeSetupFailure`
 
 #### Consumes
 
-builder actor의 world XY와 yaw, Ocean water surface query, optional forced slide, `RandomSeed`, `/Engine/BasicShapes/Cube.Cube`, `UWorld::SpawnActor`, `SpawnActorDeferred`, `FinishSpawning`
+builder actor의 world XY와 yaw, transformed actual wall world XY, Ocean water surface query, optional forced slide, `FRandomStream(NAME_None)`, `/Engine/BasicShapes/Cube.Cube`, `UWorld::SpawnActor`, `SpawnActorDeferred`, `FinishSpawning`
 
 ```cpp
 void ACourseBuilder::SetForcedSlideCm(double InSlideCm);
@@ -979,21 +1051,25 @@ void ACourseBuilder::ClearForcedSlide();
 bool ACourseBuilder::BuildRuntimeCourse(
     FShipCourseBuildResult& OutResult,
     EShipSetupFailure& OutFailure);
+bool ValidateWaterReference(
+    bool bInExclusionVolume,
+    double SurfaceZCm,
+    double& OutSurfaceZCm,
+    EShipSetupFailure& OutFailure);
 ```
 
 #### Produces
 
-runtime `ATargetPoint` start와 end 각 1개, runtime `AStaticMeshActor` wall 1개, exact 3-point world path, `UPROPERTY(Transient)` actor references, resolved slide와 water reference Z
+runtime `ATargetPoint` start와 end 각 1개, runtime `AStaticMeshActor` wall 1개, exact 3-point world path, `UPROPERTY(Transient)` actor references, resolved random seed와 slide 및 water reference Z
 
 - [ ] 4분: Water subsystem 또는 Ocean body가 없는 transient game world에서 `BuildRuntimeCourse`가 false와 `WaterSurfaceUnavailable`을 반환하고 actor reference가 모두 null인 RED test를 추가한다.
+- [ ] 4분: pure water validation helper에 exclusion true와 finite Z를 주면 `WaterLocationExcluded`, exclusion false와 non-finite Z를 주면 `WaterSurfaceUnavailable`가 반환되는 RED assertion을 같은 test에 추가한다. non-exclusion finite result에서는 query location XY가 transformed wall XY와 같은지도 기록한다.
 - [ ] 3분: repeated build가 기존 actor를 중복 생성하지 않고 false와 `CourseSpawnFailed`를 반환하는 contract assertion을 추가한다.
-- [ ] 3분: RED를 Course runtime test prefix로 실행한다. 예상 새 실패 이름은 `Course.RuntimeSetupFailure`이며 Editor full 예상 발견 수는 28개다.
+- [ ] 3분: absent slide에서 build result seed와 getter seed가 같고 fixed constant가 아니며 slide가 `[-500,500]` 안인지 검증한다. forced slide에서는 seed가 0이고 random log가 없는 RED assertion을 같은 test에 추가한다. 서로 다른 두 run의 seed 차이는 flaky unit assertion으로 만들지 않고 최종 동적 검증에서 확인한다.
+- [ ] 3분: RED를 Course runtime test prefix로 실행한다. 예상 새 실패 이름은 `Course.RuntimeSetupFailure`이며 Editor full 예상 발견 수는 27개다.
 - [ ] 4분: header에 `FShipCourseBuildResult`, forced slide API, read-only getters와 다음 private state를 추가한다.
 
 ```cpp
-UPROPERTY(EditDefaultsOnly, Category = "Course")
-int32 RandomSeed = 20260809;
-
 TOptional<double> ForcedSlideCm;
 
 UPROPERTY(Transient)
@@ -1006,11 +1082,61 @@ UPROPERTY(Transient)
 TObjectPtr<AStaticMeshActor> WallActor;
 
 TArray<FVector> WorldPath;
+int32 ResolvedRandomSeed = 0;
 double ResolvedSlideCm = 0.0;
+bool bRandomCourseLogged = false;
 ```
 
+- [ ] 3분: forced slide가 있으면 seed 0과 해당 값을 저장한다. absent일 때만 `FRandomStream(NAME_None)`을 만들고 `GetInitialSeed()`와 `FRandRange(-500.0, 500.0)` 결과를 저장한다. 5.5.4 local header의 `Initialize(FName)`가 `NAME_None`에 `FPlatformTime::Cycles()`를 쓰는 계약을 source 주석과 구현으로 다시 대조한다.
+
+```cpp
+if (ForcedSlideCm.IsSet())
+{
+    ResolvedRandomSeed = 0;
+    ResolvedSlideCm = ForcedSlideCm.GetValue();
+}
+else
+{
+    FRandomStream RandomStream(NAME_None);
+    ResolvedRandomSeed = RandomStream.GetInitialSeed();
+    ResolvedSlideCm = RandomStream.FRandRange(-500.0, 500.0);
+    if (!bRandomCourseLogged)
+    {
+        UE_LOG(LogCourseBuilder, Display, TEXT("Stage4RandomCourse seed=%d slide=%.3f"),
+            ResolvedRandomSeed, ResolvedSlideCm);
+        bRandomCourseLogged = true;
+    }
+}
+```
+
+- [ ] 4분: `BuildCourseDefinition(GetActorTransform(), 0.0, ResolvedSlideCm)`으로 planar definition을 먼저 만들고 그 결과의 `WallWorld.X`와 `WallWorld.Y`를 water query location으로 고정한다. builder origin XY를 query에 쓰지 않는다.
 - [ ] 4분: `GetWorld()`과 `UWaterSubsystem::GetWaterSubsystem(GetWorld())`과 `GetOceanBodyComponent()`를 순서대로 null 검사한다.
-- [ ] 4분: builder location에서 `EWaterBodyQueryFlags::ComputeLocation`만 요청한다. waves flag를 넣지 않고 반환된 water surface location Z가 finite인지 확인한다.
+- [ ] 4분: actual wall world XY에서 `EWaterBodyQueryFlags::ComputeLocation`만 요청한다. exclusion volume이면 `WaterLocationExcluded`, surface Z가 non-finite면 `WaterSurfaceUnavailable`으로 실패한다.
+- [ ] 3분: `ValidateWaterReference`가 exclusion을 finite보다 먼저 분류하고 성공할 때만 output Z와 `None`을 반환하게 구현한다. CourseBuilder는 `WaterInfo.IsInExclusionVolume()`과 surface Z를 이 helper에 전달한다.
+
+```cpp
+bool ValidateWaterReference(
+    bool bInExclusionVolume,
+    double SurfaceZCm,
+    double& OutSurfaceZCm,
+    EShipSetupFailure& OutFailure)
+{
+    OutSurfaceZCm = 0.0;
+    if (bInExclusionVolume)
+    {
+        OutFailure = EShipSetupFailure::WaterLocationExcluded;
+        return false;
+    }
+    if (!FMath::IsFinite(SurfaceZCm))
+    {
+        OutFailure = EShipSetupFailure::WaterSurfaceUnavailable;
+        return false;
+    }
+    OutSurfaceZCm = SurfaceZCm;
+    OutFailure = EShipSetupFailure::None;
+    return true;
+}
+```
 
 ```cpp
 UWaterSubsystem* WaterSubsystem = UWaterSubsystem::GetWaterSubsystem(GetWorld());
@@ -1022,19 +1148,31 @@ if (OceanBody == nullptr)
     OutFailure = EShipSetupFailure::WaterSurfaceUnavailable;
     return false;
 }
+const FShipCourseDefinition PlanarDefinition = BuildCourseDefinition(
+    GetActorTransform(), 0.0, ResolvedSlideCm);
+const FVector WaterQueryLocation(
+    PlanarDefinition.WallWorld.X,
+    PlanarDefinition.WallWorld.Y,
+    GetActorLocation().Z);
 const FWaterBodyQueryResult WaterInfo = OceanBody->QueryWaterInfoClosestToWorldLocation(
-    GetActorLocation(),
+    WaterQueryLocation,
     EWaterBodyQueryFlags::ComputeLocation);
-const double WaterSurfaceZCm = WaterInfo.GetWaterSurfaceLocation().Z;
-if (!FMath::IsFinite(WaterSurfaceZCm))
+const bool bInExclusionVolume = WaterInfo.IsInExclusionVolume();
+const double QueriedSurfaceZCm = bInExclusionVolume
+    ? 0.0
+    : WaterInfo.GetWaterSurfaceLocation().Z;
+double WaterSurfaceZCm = 0.0;
+if (!ValidateWaterReference(
+        bInExclusionVolume,
+        QueriedSurfaceZCm,
+        WaterSurfaceZCm,
+        OutFailure))
 {
-    OutFailure = EShipSetupFailure::WaterSurfaceUnavailable;
     return false;
 }
 ```
 
-- [ ] 3분: forced slide가 있으면 그대로 쓰고 없을 때만 `FRandomStream RandomStream(RandomSeed)`와 `FRandRange(-500.0, 500.0)`으로 slide를 한 번 생성한다. test accessor로 initial seed가 `RandomSeed`와 같은지 확인한다.
-- [ ] 3분: Task 2 helper로 course definition을 만들고 wall center Z가 water surface Z보다 150 cm 높도록 설정한다. cube scale `(1,10,5)`로 bottom이 surface 아래 100 cm가 된다.
+- [ ] 3분: Task 2 helper를 실제 water surface Z로 다시 호출해 final course definition을 만들고 wall center Z가 water surface Z보다 150 cm 높도록 설정한다. cube scale `(1,10,5)`로 bottom이 surface 아래 100 cm가 된다.
 - [ ] 3분: `LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"))`가 null이면 `MeshLoadFailed`로 종료한다.
 - [ ] 5분: start와 end는 `SpawnActor<ATargetPoint>`로 생성하고 wall은 full spawn transform에 flat yaw와 cube scale을 넣어 `SpawnActorDeferred<AStaticMeshActor>`로 생성한다. runtime placement 뒤 `SetActorTransform`을 호출하지 않는다.
 - [ ] 4분: wall `UStaticMeshComponent`에 mesh를 설정하고 mobility Static, `QueryOnly`, object `WorldStatic`, all channels Ignore, `ECC_Pawn`만 Block으로 설정한 뒤 `FinishSpawning`한다.
@@ -1055,15 +1193,17 @@ WallActor->FinishSpawning(WallTransform);
 ```
 
 - [ ] 4분: spawn 중간 실패 시 이 builder가 만든 actor만 `Destroy()`하고 세 UPROPERTY reference와 `WorldPath`를 비운 뒤 정확한 setup failure를 반환한다.
-- [ ] 3분: 성공 뒤 `OutResult`와 getters에 같은 두 target, wall, 3점 path, slide, surface Z가 들어가는지 test accessor assertion을 추가한다.
-- [ ] 3분: targeted GREEN에서 runtime setup failure test와 전체 Stage 4 unit 16개가 통과하는지 확인한다.
-- [ ] 3분: Editor full 회귀에서 기존 12개와 Stage 4 unit 16개, 합계 28개를 확인한다.
+- [ ] 3분: 성공 뒤 `OutResult`와 getters에 같은 두 target, wall, 3점 path, seed, slide, surface Z가 들어가는지 test accessor assertion을 추가한다. absent random log marker는 한 번, forced path에서는 0회인지 확인한다.
+- [ ] 3분: targeted GREEN에서 runtime setup failure test와 전체 Stage 4 unit 15개가 통과하는지 확인한다.
+- [ ] 3분: Editor full 회귀에서 기존 12개와 Stage 4 unit 15개, 합계 27개를 확인한다.
 - [ ] 2분: `git diff -- ShipAutonomySim/Source/ShipAutonomySim/ShipAutonomySim.Build.cs`가 비어 있고 map, config, asset diff가 없는지 확인한다.
 - [ ] 3분: 아래 commit을 만든다.
 
 ```powershell
 git add -- ShipAutonomySim/Source/ShipAutonomySim/Public/CourseBuilder.h `
   ShipAutonomySim/Source/ShipAutonomySim/Private/CourseBuilder.cpp `
+  ShipAutonomySim/Source/ShipAutonomySim/Private/ShipNavigationSimulation.h `
+  ShipAutonomySim/Source/ShipAutonomySim/Private/ShipNavigationSimulation.cpp `
   ShipAutonomySim/Source/ShipAutonomySim/Private/Tests/ShipNavigationTests.cpp
 git commit -m "feat: 런타임 항로 생성 추가" `
   -m "변경 이유`n동일 world에서 재현 가능한 target과 wall 및 path 생성 필요" `
@@ -1076,14 +1216,18 @@ git commit -m "feat: 런타임 항로 생성 추가" `
 #### Files
 - Modify: `ShipAutonomySim/Source/ShipAutonomySim/Public/ShipNavigator.h`의 configure와 enable API 및 tick state
 - Modify: `ShipAutonomySim/Source/ShipAutonomySim/Private/ShipNavigator.cpp`의 progress, guidance, coast, error, debug tick
+- Modify: `ShipAutonomySim/Source/ShipAutonomySim/Public/ShipPawn.h`의 Navigator component, getter와 public `EnterAutonomy`
+- Modify: `ShipAutonomySim/Source/ShipAutonomySim/Private/ShipPawn.cpp`의 Navigator 생성과 private latch 연결
 - Modify: `ShipAutonomySim/Source/ShipAutonomySim/Public/SimGameMode.h`의 runtime error ingress declaration과 latch state
 - Modify: `ShipAutonomySim/Source/ShipAutonomySim/Private/SimGameMode.cpp`의 최초 runtime error 안전 정지
 - Modify: `ShipAutonomySim/Source/ShipAutonomySim/Private/Tests/ShipNavigationTests.cpp`의 Navigator test
+- Modify: `ShipAutonomySim/Source/ShipAutonomySim/Private/Tests/ShipMovementTests.cpp`의 auto start transition test
 - Test: `ShipAutonomySim.ShipNavigation.Unit.Navigator.ControlCoastAndError`
+- Test: `ShipAutonomySim.ShipNavigation.Unit.Pawn.AutoStartRemovesManualMapping`
 
 #### Consumes
 
-exact 3-point path, Movement signed speed, owner actor location과 forward vector, 순수 progress와 lookahead와 guidance와 stopping helper, actual wall reference, GameMode runtime error ingress
+exact 3-point path, Movement signed speed, owner actor location과 forward vector, 순수 progress와 lookahead와 guidance와 stopping helper, actual wall reference, GameMode runtime error ingress, Task 5 private `LockManualInputForAutonomy`
 
 ```cpp
 bool UShipNavigator::Configure(
@@ -1093,20 +1237,27 @@ bool UShipNavigator::Configure(
     ASimGameMode* InRunOwner);
 void UShipNavigator::SetNavigationEnabled(bool bEnabled);
 bool UShipNavigator::IsNavigationEnabled() const;
+bool AShipPawn::EnterAutonomy(
+    const TArray<FVector>& WorldPath,
+    AStaticMeshActor* ActualWall,
+    ASimGameMode* RunOwner);
+UShipNavigator* AShipPawn::GetNavigator() const;
 void ASimGameMode::ReportRuntimeCalculationError(EShipRuntimeCalculationError Error);
 ```
 
 #### Produces
 
-monotonic path state, 300 cm live target, `SetSteer`와 `SetThrottle` output, final dynamic coast latch, persistent runtime error report, green path와 yellow waypoint와 cyan live target과 actual wall red debug draw
+monotonic path state, 300 cm live target, `SetSteer`와 `SetThrottle` output, final dynamic coast latch, persistent runtime error report, green path와 yellow waypoint와 cyan live target과 actual wall red debug draw, manual input을 먼저 잠그고 Navigator를 enable하는 단일 public `EnterAutonomy`
 
-- [ ] 4분: valid 3-point configure 뒤 Navigator가 enable되고 Movement tick prerequisite가 등록되는 RED assertion을 작성한다.
+- [ ] 4분: valid 3-point configure가 성공하고 Movement tick prerequisite가 등록되는지 확인한 뒤 `SetNavigationEnabled(true)`를 호출했을 때만 Navigator가 enable되는 RED assertion을 작성한다.
 - [ ] 4분: path를 따라 heading error와 throttle curve가 Movement input에 전달되며 actor transform이 바뀌지 않는 RED case를 작성한다.
 - [ ] 4분: final remaining distance가 `dynamic stopping distance + 25 cm` 이하가 되면 throttle 0으로 latch되고 ship이 다시 경계 밖으로 보여도 throttle이 재개되지 않는 RED case를 작성한다.
-- [ ] 4분: invalid path, non-finite location, stopping distance 실패마다 해당 `EShipRuntimeCalculationError`가 한 번 보고되고 Navigator disable과 두 입력 0이 유지되는 RED case를 작성한다.
-- [ ] 3분: targeted RED를 실행한다. 예상 새 실패 이름은 `Navigator.ControlCoastAndError`이며 Editor full 예상 발견 수는 29개다.
+- [ ] 4분: invalid path, non-finite location, stopping distance 실패를 isolated fixture로 만든다. 각 fixture가 Error marker를 내기 전에 `AddExpectedError(TEXT("Stage4RuntimeCalculationError"), EAutomationExpectedErrorFlags::Contains, 1)`를 정확히 한 번 호출하고 해당 runtime error, Navigator disable, 두 입력 0을 검증한다.
+- [ ] 4분: `Pawn.AutoStartRemovesManualMapping`에 active manual mapping과 non-zero throttle과 steer 상태를 준비한 뒤 `EnterAutonomy`가 같은 call 안에서 autonomy latch true, manual mapping 제거, 입력 0, Navigator enable을 만드는 RED assertion을 추가한다. configure failure에서도 mapping inactive와 입력 0을 유지한다.
+- [ ] 3분: targeted RED를 실행한다. 예상 새 실패 이름은 `Navigator.ControlCoastAndError`, `Pawn.AutoStartRemovesManualMapping`이며 Editor full 예상 발견 수는 29개다.
 - [ ] 4분: constructor에서 `PrimaryComponentTick.bCanEverTick=true`, 기본 enable false를 설정하고 configure 시 dependency와 exact path size와 finite points 및 non-zero segment를 검사한다.
-- [ ] 3분: configure 성공 시 path와 weak actor references와 초기 progress를 저장하고 `Movement->AddTickPrerequisiteComponent(this)`를 호출한다.
+- [ ] 4분: `ShipNavigator.h`에 `Movement`를 `UPROPERTY(Transient) TObjectPtr<UShipMovement>`, `ActualWall`과 `RunOwner`를 `UPROPERTY(Transient) TWeakObjectPtr`로 선언한다. global boundary의 여섯 tuning property와 기본값을 `EditAnywhere`로 추가하고 `.generated.h`를 마지막 include로 유지한다.
+- [ ] 3분: configure 성공 시 path와 ownership에 맞는 actor references와 초기 progress를 저장하고 `Movement->AddTickPrerequisiteComponent(this)`를 호출한다.
 
 ```cpp
 bool UShipNavigator::Configure(
@@ -1138,8 +1289,9 @@ bool UShipNavigator::Configure(
 ```
 
 - [ ] 3분: `SetNavigationEnabled(false)`가 tick disable 전에 throttle과 steer를 0으로 쓰고, true는 successful configure 뒤에만 허용되게 구현한다.
-- [ ] 5분: tick에서 active progress를 한 번 갱신하고 300 cm target, heading error, steer, base throttle을 순서대로 계산한다.
-- [ ] 5분: `Progress.ActiveSegmentIndex == WorldPath.Num() - 2`인 final segment에서만 endpoint까지 remaining과 current positive forward speed의 dynamic stopping distance를 계산한다. `remaining <= stopping + 25`일 때 coast를 latch하고 throttle 0을 쓴다.
+- [ ] 5분: tick에서 active progress를 한 번 갱신하고 `LookaheadDistanceCm` target, heading error, steer, tuning property 기반 throttle을 순서대로 계산한다.
+- [ ] 3분: guidance helper에는 `HeadingFullSteerDegrees`, `FullThrottleHeadingDegrees`, `MinimumThrottleHeadingDegrees`, `MinimumThrottle`을 같은 순서로 전달하고 false이면 `InvalidHeading` 또는 `InvalidThrottle`로 안전 정지한다.
+- [ ] 5분: `Progress.ActiveSegmentIndex == WorldPath.Num() - 2`인 final segment에서만 endpoint까지 remaining과 current positive forward speed의 dynamic stopping distance를 계산한다. `remaining <= stopping + CoastMarginCm`일 때 coast를 latch하고 throttle 0을 쓴다.
 - [ ] 4분: coast 중 steer는 live target을 계속 따라가되 reverse throttle을 쓰지 않는다. throttle range assertion은 `[0,1]`이다.
 
 ```cpp
@@ -1152,7 +1304,7 @@ if (Progress.ActiveSegmentIndex == WorldPath.Num() - 2)
         FailRuntimeCalculation(EShipRuntimeCalculationError::InvalidStoppingDistance);
         return;
     }
-    if (bCoastLatched || RemainingDistanceCm <= StoppingDistanceCm + 25.0)
+    if (bCoastLatched || RemainingDistanceCm <= StoppingDistanceCm + CoastMarginCm)
     {
         bCoastLatched = true;
         Throttle = 0.0f;
@@ -1164,24 +1316,58 @@ Movement->SetThrottle(Throttle);
 
 `MotionParameters`는 Movement 내부를 노출해 얻지 않는다. Navigator cpp에서 `const FShipMotionParameters MotionParameters = FShipMotionParameters::Defaults();`를 사용해 설계에 고정된 C1, C2, stop speed 5를 재사용한다.
 
+- [ ] 4분: `ShipPawn` constructor에서 `UShipNavigator` default subobject를 만들고 `UPROPERTY(VisibleAnywhere, Category = "Autonomy") TObjectPtr<UShipNavigator>`로 보관한다. read-only `GetNavigator()`는 pointer를 반환한다.
+- [ ] 5분: `EnterAutonomy`가 Task 5 private latch를 가장 먼저 호출한 뒤 dependency와 configure를 검사하고 성공한 경우에만 Navigator를 enable한다. 실패하는 모든 branch는 mapping을 되살리지 않고 두 input 0을 다시 보장한다.
+
+```cpp
+bool AShipPawn::EnterAutonomy(
+    const TArray<FVector>& WorldPath,
+    AStaticMeshActor* ActualWall,
+    ASimGameMode* RunOwner)
+{
+    LockManualInputForAutonomy();
+    if (ShipMovement == nullptr || Navigator == nullptr || ActualWall == nullptr || RunOwner == nullptr)
+    {
+        return false;
+    }
+    if (!Navigator->Configure(WorldPath, ShipMovement, ActualWall, RunOwner))
+    {
+        ShipMovement->SetThrottle(0.0f);
+        ShipMovement->SetSteer(0.0f);
+        return false;
+    }
+    Navigator->SetNavigationEnabled(true);
+    if (!Navigator->IsNavigationEnabled())
+    {
+        ShipMovement->SetThrottle(0.0f);
+        ShipMovement->SetSteer(0.0f);
+        return false;
+    }
+    return true;
+}
+```
+
 - [ ] 4분: 각 helper false와 non-finite output을 고유 runtime error enum으로 변환하는 `FailRuntimeCalculation`을 추가한다. 이 함수는 GameMode report 후 Navigator disable과 두 input 0을 수행한다.
 - [ ] 3분: `ASimGameMode::ReportRuntimeCalculationError`의 최소 ingress에서 Task 4 latch helper를 호출하고 첫 report일 때만 `Stage4RuntimeCalculationError` marker를 Error level로 기록한다.
-- [ ] 3분: GameMode ingress가 첫 report와 반복 report 모두 현재 Movement 입력을 0으로 만들고 Navigator가 이미 disable됐어도 상태를 되살리지 않게 한다.
+- [ ] 3분: 이 Task의 GameMode ingress는 아직 Task 8 run ship을 참조하지 않고 latch와 first-only log만 소유한다. 실제 Navigator disable과 두 input 0은 `FailRuntimeCalculation`이 report 직후 수행하며 Task 8에서 GameMode의 반복 안전 정지를 연결한다.
 - [ ] 4분: `DrawDebugLine`으로 전체 path green, waypoint `DrawDebugPoint` yellow, current live target cyan, wall actor의 실제 component bounds를 `DrawDebugBox` red로 그린다. hypothetical wall transform을 다시 계산하지 않는다.
 - [ ] 3분: targeted GREEN에서 Navigator test 1개와 전체 Stage 4 unit 17개가 통과하는지 확인한다.
 - [ ] 3분: Editor full 회귀에서 기존 12개와 Stage 4 unit 17개, 합계 29개를 확인한다.
-- [ ] 2분: Navigator source가 `SetThrottle`, `SetSteer`, read-only speed 외 Movement mutator와 모든 actor transform mutator를 호출하지 않는지 `rg -n`으로 검사한다.
+- [ ] 2분: Navigator source가 `SetThrottle`, `SetSteer`, read-only speed 외 Movement mutator와 모든 actor transform mutator를 호출하지 않는지 `rg -n`으로 검사한다. Pawn의 `EnterAutonomy`에는 safety zero 외 non-zero command가 없는지도 확인한다.
 - [ ] 3분: 아래 commit을 만든다.
 
 ```powershell
 git add -- ShipAutonomySim/Source/ShipAutonomySim/Public/ShipNavigator.h `
   ShipAutonomySim/Source/ShipAutonomySim/Private/ShipNavigator.cpp `
+  ShipAutonomySim/Source/ShipAutonomySim/Public/ShipPawn.h `
+  ShipAutonomySim/Source/ShipAutonomySim/Private/ShipPawn.cpp `
   ShipAutonomySim/Source/ShipAutonomySim/Public/SimGameMode.h `
   ShipAutonomySim/Source/ShipAutonomySim/Private/SimGameMode.cpp `
-  ShipAutonomySim/Source/ShipAutonomySim/Private/Tests/ShipNavigationTests.cpp
+  ShipAutonomySim/Source/ShipAutonomySim/Private/Tests/ShipNavigationTests.cpp `
+  ShipAutonomySim/Source/ShipAutonomySim/Private/Tests/ShipMovementTests.cpp
 git commit -m "feat: 선박 경로 추종 제어 추가" `
   -m "변경 이유`n순수 유도 결과를 Stage 3 입력 경계에 안전하게 연결할 component 필요" `
-  -m "핵심 변경`nNavigator tick, coast latch, runtime error 안전 정지, debug 구현" `
+  -m "핵심 변경`nNavigator tick, coast latch, runtime error 안전 정지, EnterAutonomy와 debug 구현" `
   -m "검증 방법`nNavigator unit test와 transform 소유권 및 Editor 회귀"
 ```
 
@@ -1191,8 +1377,10 @@ git commit -m "feat: 선박 경로 추종 제어 추가" `
 - Modify: `ShipAutonomySim/Source/ShipAutonomySim/Public/SimGameMode.h`의 lifecycle override, run state, read-only getters
 - Modify: `ShipAutonomySim/Source/ShipAutonomySim/Private/SimGameMode.cpp`의 InitGame, BeginPlay, Tick, terminal과 logging
 - Modify: `ShipAutonomySim/Source/ShipAutonomySim/Private/Tests/ShipNavigationTests.cpp`의 GameMode tests
+- Modify: `ShipAutonomySim/Source/ShipAutonomySim/Private/Tests/ShipMovementTests.cpp`의 기존 Stage 3 GameMode bootstrap expectation
 - Test: `ShipAutonomySim.ShipNavigation.Unit.GameMode.OptionBootstrap`
 - Test: `ShipAutonomySim.ShipNavigation.Unit.GameMode.TerminalRuntimeError`
+- Test: 기존 `ShipAutonomySim.ShipMovement.GameMode.Bootstrap`
 
 #### Consumes
 
@@ -1210,13 +1398,15 @@ void ASimGameMode::ReportRuntimeCalculationError(EShipRuntimeCalculationError Er
 
 #### Produces
 
-absent-only random slide, invalid-present setup failure, one CourseBuilder와 one ship spawn, possession과 autonomy transition, Navigator to Movement to GameMode tick ordering, persistent four-state terminal result, collision identity, timeout 45초, first-only logs와 test getters
+absent-only random slide, invalid-present setup failure, one CourseBuilder와 one ship spawn, possession과 autonomy transition, Navigator to Movement to GameMode tick ordering, persistent four-state terminal result, collision identity, default timeout 45초, first-only logs와 test getters
 
 - [ ] 4분: GameMode option test에 absent, present-empty, junk, conversion failure `1e`, `NaN`, `Inf`, `-501`, `501`, valid `-500`, `0`, `500`을 추가한다.
 - [ ] 3분: absent만 random mode가 true이고 모든 invalid present value는 setup failure 및 random mode false라는 RED assertion을 넣는다.
 - [ ] 4분: terminal test에서 같은 tick의 collision, goal, timeout이 모두 true일 때 Collision, goal과 timeout은 Success, timeout 단독은 Timeout이 되는 RED case를 추가한다.
-- [ ] 4분: runtime error 두 번 보고 뒤 first error 보존, count 2, Navigator disabled, 두 입력 0, Success 영구 금지, first-only log counter 1을 검증한다.
+- [ ] 4분: runtime error test에서 `AddExpectedError(TEXT("Stage4RuntimeCalculationError"), EAutomationExpectedErrorFlags::Contains, 1)`를 report 전에 정확히 한 번 등록한다. error를 두 번 보고 first error 보존, count 2, Navigator disabled, 두 입력 0, Success 영구 금지, 실제 Error marker 1회를 검증한다.
 - [ ] 4분: `GameMode.OptionBootstrap`의 BeginPlay subcase에서 possession 직후 첫 Tick 전에 `EnterAutonomy` call count 1, mapping inactive, 두 input 0, Navigator enabled를 요구하는 RED assertion을 추가한다.
+- [ ] 4분: intentional invalid BeginPlay subcase는 `AddExpectedError(TEXT("Stage4SetupFailure"), EAutomationExpectedErrorFlags::Contains, 1)`를 실패 유발 전에 정확히 한 번 등록하고 setup marker도 1회인지 검증한다. classification만 검사하는 subcase는 Error log를 만들지 않는다.
+- [ ] 4분: 기존 `ShipMovement.GameMode.Bootstrap`을 단일 ship spawn과 possession, manual mapping inactive, `GetNavigator()->IsNavigationEnabled()==true` 계약으로 바꾼다. Stage 3 manual input 구현과 다른 11개 기존 test는 그대로 두고 제품 bootstrap에 mapping을 다시 추가하지 않는다.
 - [ ] 3분: targeted RED를 실행한다. 예상 새 실패는 `GameMode.OptionBootstrap`, `GameMode.TerminalRuntimeError`이며 Editor full 예상 발견 수는 31개다.
 - [ ] 3분: `InitGame` 첫 줄에서 `Super::InitGame(MapName, Options, ErrorMessage)`를 호출한다.
 - [ ] 2분: GameMode constructor에서 `PrimaryActorTick.bCanEverTick=true`를 고정하고 `Tick` 첫 줄에서 `Super::Tick(DeltaSeconds)`를 호출한다.
@@ -1242,6 +1432,7 @@ void ASimGameMode::InitGame(const FString& MapName, const FString& Options, FStr
 ```
 
 - [ ] 3분: `BeginPlay`에서 setup failure가 있으면 `Stage4SetupFailure` marker를 최초 1회 기록하고 어떤 runtime actor도 spawn하지 않고 반환한다.
+- [ ] 4분: `SimGameMode.h`에서 run ship과 builder는 `UPROPERTY(Transient) TObjectPtr`, collision actor와 component는 `UPROPERTY(Transient) TWeakObjectPtr`로 선언한다. global boundary의 timeout, goal radius, success speed property와 기본값을 `EditAnywhere`로 추가하고 `.generated.h`를 마지막 include로 유지한다.
 - [ ] 5분: `SpawnActorDeferred<ACourseBuilder>`로 builder를 만들고 forced이면 `SetForcedSlideCm`, absent이면 `ClearForcedSlide` 후 `FinishSpawning`한다.
 - [ ] 4분: `BuildRuntimeCourse`가 실패하면 returned setup failure를 latch하고 first-only log 후 종료한다.
 - [ ] 5분: course start transform에서 `AShipPawn`을 정확히 한 번 spawn하고 player controller를 찾아 possess한다. 기존 Stage 3 pawn spawn이 중복 실행되지 않도록 old bootstrap을 이 orchestration으로 교체한다.
@@ -1250,14 +1441,16 @@ void ASimGameMode::InitGame(const FString& MapName, const FString& Options, FStr
 - [ ] 3분: successful activation 뒤 `AddTickPrerequisiteComponent(ShipMovement)`를 GameMode에 호출한다. Navigator configure의 Movement prerequisite와 합쳐 순서를 Navigator, Movement, GameMode로 고정한다.
 - [ ] 4분: GameMode tick에서 setup 또는 terminal 뒤 input 0을 계속 쓰고 run 중에만 elapsed를 `DeltaSeconds`로 누적한다.
 - [ ] 4분: Movement의 `ConsumeBlockingHit`를 한 번 호출해 모든 blocking geometry를 collision candidate로 삼고 actor와 component identity를 저장한다.
-- [ ] 4분: final endpoint XY distance `<=100 cm`와 `abs(signed speed)<=5 cm/s`를 success 조건으로 계산한다. runtime error latch가 있으면 success false다.
-- [ ] 3분: elapsed `>=45.0`을 timeout candidate로 만들고 pure selector로 세 candidate를 같은 tick에 평가한다.
+- [ ] 4분: final endpoint XY distance `<=GoalRadiusCm`와 `abs(signed speed)<=SuccessSpeedThresholdCmPerSecond`를 success 조건으로 계산한다. runtime error latch가 있으면 success false다.
+- [ ] 3분: elapsed `>=TimeoutSeconds`를 timeout candidate로 만들고 pure selector로 세 candidate를 같은 tick에 평가한다.
 
 ```cpp
 const FShipTerminalInputs Inputs{
     bBlockingHit,
-    !RuntimeErrorState.bLatched && GoalDistanceCm <= 100.0 && FMath::Abs(SignedSpeedCmPerSecond) <= 5.0,
-    ElapsedRunSeconds >= 45.0,
+    !RuntimeErrorState.bLatched
+        && GoalDistanceCm <= GoalRadiusCm
+        && FMath::Abs(SignedSpeedCmPerSecond) <= SuccessSpeedThresholdCmPerSecond,
+    ElapsedRunSeconds >= TimeoutSeconds,
     RuntimeErrorState.bLatched
 };
 const EShipRunResult Candidate = SelectTerminalResult(Inputs);
@@ -1271,7 +1464,7 @@ if (RunResult == EShipRunResult::Running && Candidate != EShipRunResult::Running
 
 - [ ] 4분: terminal result는 한 번 Running을 벗어나면 절대 바꾸지 않고 `Stage4Terminal Success`, `Timeout`, `Collision` marker를 각 run 최대 1회 기록한다.
 - [ ] 4분: `ReportRuntimeCalculationError`는 pure latch count를 매번 증가시키되 최초 report에서만 Error log와 Navigator disable을 수행하고 이후 매 tick 두 input 0을 다시 보장한다.
-- [ ] 4분: header에 run result, setup failure, runtime error, count, slide, elapsed, run ship, builder, collision actor와 component의 read-only getter를 고정 signature대로 구현한다.
+- [ ] 4분: header에 run result, setup failure, runtime error, count, slide, elapsed, run ship, builder, collision actor와 component의 read-only getter를 고정 signature대로 구현한다. strong 및 weak pointer getter는 `.Get()`을 반환한다.
 - [ ] 3분: targeted GREEN에서 GameMode 2개와 전체 Stage 4 unit 19개가 통과하는지 확인한다.
 - [ ] 3분: Editor full 회귀에서 Stage 3 12개와 Stage 4 unit 19개, 합계 31개를 확인한다.
 - [ ] 2분: invalid option path가 `ClearForcedSlide`, `FRandomStream`, CourseBuilder spawn에 도달하지 않는지 test와 diff로 확인한다.
@@ -1280,7 +1473,8 @@ if (RunResult == EShipRunResult::Running && Candidate != EShipRunResult::Running
 ```powershell
 git add -- ShipAutonomySim/Source/ShipAutonomySim/Public/SimGameMode.h `
   ShipAutonomySim/Source/ShipAutonomySim/Private/SimGameMode.cpp `
-  ShipAutonomySim/Source/ShipAutonomySim/Private/Tests/ShipNavigationTests.cpp
+  ShipAutonomySim/Source/ShipAutonomySim/Private/Tests/ShipNavigationTests.cpp `
+  ShipAutonomySim/Source/ShipAutonomySim/Private/Tests/ShipMovementTests.cpp
 git commit -m "feat: 자율주행 실행 오케스트레이션 추가" `
   -m "변경 이유`noption부터 terminal까지 한 owner가 관리하는 run lifecycle 필요" `
   -m "핵심 변경`nInitGame 검증, spawn과 possession, tick 순서, terminal 및 error latch 구현" `
@@ -1441,7 +1635,7 @@ $Arguments = @(
     '-nowrite',
     '-TestExit="Automation Test Queue Empty"',
     '-ExecCmds="Automation RunTests ShipAutonomySim.ShipNavigation.ActualWorld.NavigationSweep;SoftQuit;"',
-    "-Log=$Log"
+    "-abslog=$Log"
 )
 $Process = Start-Process -FilePath $Editor -ArgumentList $Arguments -PassThru -WindowStyle Hidden
 if (-not $Process.WaitForExit(900000)) {
@@ -1504,7 +1698,7 @@ function Invoke-ShipEditorAutomation {
         '-nowrite',
         '-TestExit="Automation Test Queue Empty"',
         "-ExecCmds=`"Automation RunTests $Filter;SoftQuit;`"",
-        "-Log=$Log"
+        "-abslog=$Log"
     )
     $Process = Start-Process -FilePath $Editor -ArgumentList $Arguments -PassThru -WindowStyle Hidden
     if (-not $Process.WaitForExit(600000)) {
@@ -1534,10 +1728,10 @@ Invoke-ShipEditorAutomation 'ShipAutonomySim.ShipNavigation.Unit' 'Stage4-Task3-
 Invoke-ShipEditorAutomation 'ShipAutonomySim' 'Stage4-Task3-Full-GREEN.log' 20
 Invoke-ShipEditorAutomation 'ShipAutonomySim.ShipNavigation.Unit' 'Stage4-Task4-Unit-GREEN.log' 11
 Invoke-ShipEditorAutomation 'ShipAutonomySim' 'Stage4-Task4-Full-GREEN.log' 23
-Invoke-ShipEditorAutomation 'ShipAutonomySim.ShipNavigation.Unit' 'Stage4-Task5-Unit-GREEN.log' 15
-Invoke-ShipEditorAutomation 'ShipAutonomySim' 'Stage4-Task5-Full-GREEN.log' 27
-Invoke-ShipEditorAutomation 'ShipAutonomySim.ShipNavigation.Unit' 'Stage4-Task6-Unit-GREEN.log' 16
-Invoke-ShipEditorAutomation 'ShipAutonomySim' 'Stage4-Task6-Full-GREEN.log' 28
+Invoke-ShipEditorAutomation 'ShipAutonomySim.ShipNavigation.Unit' 'Stage4-Task5-Unit-GREEN.log' 14
+Invoke-ShipEditorAutomation 'ShipAutonomySim' 'Stage4-Task5-Full-GREEN.log' 26
+Invoke-ShipEditorAutomation 'ShipAutonomySim.ShipNavigation.Unit' 'Stage4-Task6-Unit-GREEN.log' 15
+Invoke-ShipEditorAutomation 'ShipAutonomySim' 'Stage4-Task6-Full-GREEN.log' 27
 Invoke-ShipEditorAutomation 'ShipAutonomySim.ShipNavigation.Unit' 'Stage4-Task7-Unit-GREEN.log' 17
 Invoke-ShipEditorAutomation 'ShipAutonomySim' 'Stage4-Task7-Full-GREEN.log' 29
 Invoke-ShipEditorAutomation 'ShipAutonomySim.ShipNavigation.Unit' 'Stage4-Task8-Unit-GREEN.log' 19
@@ -1548,7 +1742,7 @@ GREEN과 회귀의 공통 exit condition은 다음과 같다.
 
 - process exit code 0
 - requested test count가 Task의 예상 count와 일치
-- `Result={Fail}`, `Error:`, `Ensure condition failed`, `Unknown test` 0회
+- `Result={Fail}`, unexpected `Error:`, `Ensure condition failed`, `Unknown test` 0회. 의도한 Error marker는 각 test가 먼저 등록한 `AddExpectedError`의 exact occurrence와 일치해야 한다.
 - `TEST COMPLETE. EXIT CODE: 0` 1회
 - `SoftQuit` 뒤 정상 engine shutdown
 
@@ -1560,7 +1754,7 @@ Task 2부터 Task 8까지의 RED 예상 실패 이름은 각 Task에 열거한 �
 
 ### 1. Targeted pure tests
 
-예상 결과는 Stage 4 unit 19개 통과, failure와 error와 ensure와 unknown test 0, exit code 0이다.
+예상 결과는 Stage 4 unit 19개 통과, failure와 unexpected error와 ensure와 unknown test 0, 등록한 expected Error marker의 exact occurrence 충족, exit code 0이다.
 
 ```powershell
 $Editor = 'C:\Program Files\Epic Games\UE_5.5\Engine\Binaries\Win64\UnrealEditor-Cmd.exe'
@@ -1570,7 +1764,7 @@ $Log = 'C:\Users\siwon\Documents\Codex\2026-08-07\krafton-web-viewer\work\image-
   -Unattended -NoSplash -NullRHI -NoAudio -NoPause -NoP4 -nowrite `
   -TestExit='Automation Test Queue Empty' `
   -ExecCmds='Automation RunTests ShipAutonomySim.ShipNavigation.Unit;SoftQuit;' `
-  "-Log=$Log"
+  "-abslog=$Log"
 if ($LASTEXITCODE -ne 0) {
     throw "Targeted unit Automation failed with exit code $LASTEXITCODE"
 }
@@ -1597,7 +1791,7 @@ $Arguments = @(
     '-nowrite',
     '-TestExit="Automation Test Queue Empty"',
     '-ExecCmds="Automation RunTests ShipAutonomySim.ShipNavigation.ActualWorld.NavigationSweep;SoftQuit;"',
-    "-Log=$Log"
+    "-abslog=$Log"
 )
 $Process = Start-Process -FilePath $Editor -ArgumentList $Arguments -PassThru -WindowStyle Hidden
 if (-not $Process.WaitForExit(900000)) {
@@ -1617,11 +1811,12 @@ Application context가 다른 test를 한 process에 억지로 합치지 않고 
 $Editor = 'C:\Program Files\Epic Games\UE_5.5\Engine\Binaries\Win64\UnrealEditor-Cmd.exe'
 $Project = 'C:\Users\siwon\Documents\Codex\2026-08-07\krafton-web-viewer\work\image-sequence-viewer\ShipAutonomySim\ShipAutonomySim.uproject'
 $EditorLog = 'C:\Users\siwon\Documents\Codex\2026-08-07\krafton-web-viewer\work\image-sequence-viewer\ShipAutonomySim\Saved\Logs\Stage4-Full-Editor.log'
+$Log = $EditorLog
 & $Editor $Project `
   -Unattended -NoSplash -NullRHI -NoAudio -NoPause -NoP4 -nowrite `
   -TestExit='Automation Test Queue Empty' `
   -ExecCmds='Automation RunTests ShipAutonomySim;SoftQuit;' `
-  "-Log=$EditorLog"
+  "-abslog=$Log"
 if ($LASTEXITCODE -ne 0) {
     throw "Full Editor Automation failed with exit code $LASTEXITCODE"
 }
@@ -1631,6 +1826,7 @@ if ($LASTEXITCODE -ne 0) {
 $Editor = 'C:\Program Files\Epic Games\UE_5.5\Engine\Binaries\Win64\UnrealEditor-Cmd.exe'
 $Project = 'C:\Users\siwon\Documents\Codex\2026-08-07\krafton-web-viewer\work\image-sequence-viewer\ShipAutonomySim\ShipAutonomySim.uproject'
 $GameLog = 'C:\Users\siwon\Documents\Codex\2026-08-07\krafton-web-viewer\work\image-sequence-viewer\ShipAutonomySim\Saved\Logs\Stage4-Full-Game.log'
+$Log = $GameLog
 $Arguments = @(
     $Project,
     '/Game/Maps/MainLevel?Stage4Slide=-500',
@@ -1644,7 +1840,7 @@ $Arguments = @(
     '-nowrite',
     '-TestExit="Automation Test Queue Empty"',
     '-ExecCmds="Automation RunTests ShipAutonomySim;SoftQuit;"',
-    "-Log=$GameLog"
+    "-abslog=$Log"
 )
 $Process = Start-Process -FilePath $Editor -ArgumentList $Arguments -PassThru -WindowStyle Hidden
 if (-not $Process.WaitForExit(900000)) {
@@ -1687,33 +1883,36 @@ if ($LASTEXITCODE -ne 0) {
 
 ### 5. MainLevel no-write load
 
-map과 config hash를 먼저 저장한 뒤 `-nowrite`와 `QUIT_EDITOR`로 MainLevel을 game mode로 한 번 load한다. `AutomationOpenMap`, `QUIT`, `SoftQuit`을 이 단계에 사용하지 않는다.
+map과 현재 Git이 추적하는 기존 config 파일 집합과 각 hash를 먼저 저장한 뒤 `-nowrite`와 `QUIT_EDITOR`로 MainLevel을 game mode로 한 번 load한다. `AutomationOpenMap`, `QUIT`, `SoftQuit`을 이 단계에 사용하지 않는다.
 
 ```powershell
 $Repo = 'C:\Users\siwon\Documents\Codex\2026-08-07\krafton-web-viewer\work\image-sequence-viewer'
 $Project = Join-Path $Repo 'ShipAutonomySim\ShipAutonomySim.uproject'
-$Map = Join-Path $Repo 'ShipAutonomySim\Content\Maps\MainLevel.umap'
-$Configs = @(
-    (Join-Path $Repo 'ShipAutonomySim\Config\DefaultEngine.ini'),
-    (Join-Path $Repo 'ShipAutonomySim\Config\DefaultGame.ini'),
-    (Join-Path $Repo 'ShipAutonomySim\Config\DefaultInput.ini')
-)
+$ConfigRelativePaths = @(git -C $Repo ls-files -- 'ShipAutonomySim/Config/*.ini' | Sort-Object)
+if ($LASTEXITCODE -ne 0 -or $ConfigRelativePaths.Count -eq 0) {
+    throw 'No tracked config ini files found before no-write validation'
+}
+$ProtectedRelativePaths = @('ShipAutonomySim/Content/Maps/MainLevel.umap') + $ConfigRelativePaths
 $BeforeHashes = @{}
-foreach ($Path in @($Map) + $Configs) {
-    $BeforeHashes[$Path] = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash
+foreach ($RelativePath in $ProtectedRelativePaths) {
+    $Path = Join-Path $Repo $RelativePath
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Protected file is missing before no-write validation: $RelativePath"
+    }
+    $BeforeHashes[$RelativePath] = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash
 }
 $BeforeGit = @(git -C $Repo status --porcelain=v1)
-$NoWriteLog = Join-Path $Repo 'ShipAutonomySim\Saved\Logs\Stage4-MainLevel-NoWrite.log'
+$Log = Join-Path $Repo 'ShipAutonomySim\Saved\Logs\Stage4-MainLevel-NoWrite.log'
 & 'C:\Program Files\Epic Games\UE_5.5\Engine\Binaries\Win64\UnrealEditor-Cmd.exe' `
   $Project /Game/Maps/MainLevel -game -Unattended -NoSplash -NullRHI -NoAudio -NoPause -NoP4 -nowrite `
-  -ExecCmds='QUIT_EDITOR' "-Log=$NoWriteLog"
+  -ExecCmds='QUIT_EDITOR' "-abslog=$Log"
 if ($LASTEXITCODE -ne 0) {
     throw "MainLevel no-write load failed with exit code $LASTEXITCODE"
 }
-if (-not (Select-String -LiteralPath $NoWriteLog -SimpleMatch 'Load map complete' -Quiet)) {
+if (-not (Select-String -LiteralPath $Log -SimpleMatch 'Load map complete' -Quiet)) {
     throw 'MainLevel load completion marker missing'
 }
-if (Select-String -LiteralPath $NoWriteLog -Pattern 'LoadErrors|Fatal error|MapCheck: Error') {
+if (Select-String -LiteralPath $Log -Pattern 'LoadErrors|Fatal error|MapCheck: Error') {
     throw 'MainLevel no-write log contains a failure marker'
 }
 ```
@@ -1721,10 +1920,21 @@ if (Select-String -LiteralPath $NoWriteLog -Pattern 'LoadErrors|Fatal error|MapC
 ### 6. Diff, map, config, Git unchanged gate
 
 ```powershell
-foreach ($Path in @($Map) + $Configs) {
+$AfterConfigRelativePaths = @(git -C $Repo ls-files -- 'ShipAutonomySim/Config/*.ini' | Sort-Object)
+if ($LASTEXITCODE -ne 0) {
+    throw 'Failed to enumerate tracked config ini files after no-write validation'
+}
+if (($AfterConfigRelativePaths -join "`n") -ne ($ConfigRelativePaths -join "`n")) {
+    throw 'No-Go tracked config file set changed during no-write validation'
+}
+foreach ($RelativePath in $ProtectedRelativePaths) {
+    $Path = Join-Path $Repo $RelativePath
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "No-Go protected file disappeared: $RelativePath"
+    }
     $AfterHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash
-    if ($AfterHash -ne $BeforeHashes[$Path]) {
-        throw "No-Go protected file changed: $Path"
+    if ($AfterHash -ne $BeforeHashes[$RelativePath]) {
+        throw "No-Go protected file changed: $RelativePath"
     }
 }
 $AfterGit = @(git -C $Repo status --porcelain=v1)
@@ -1744,7 +1954,8 @@ git -C $Repo diff --name-only -- ShipAutonomySim/Content ShipAutonomySim/Config
 
 - [ ] 2분: 자동 검증이 모두 끝난 뒤 Unreal Editor에서 MainLevel을 열고 save prompt가 없는지 확인한다.
 - [ ] 3분: PIE에서 green 3-point path, yellow waypoint, cyan live target, red actual wall bounds가 실제 actor와 일치하는지 본다.
-- [ ] 3분: 수동 입력 직후 autonomy로 전환했을 때 mapping이 제거되고 throttle과 steer가 순간적으로 0이 된 뒤 Navigator output만 들어오는지 본다.
+- [ ] 3분: Play 시작 직후 별도 조작 없이 autonomy가 활성화되고 manual mapping이 남지 않으며 Navigator output만 들어오는지 본다.
+- [ ] 3분: 운항 중 W, S, A, D를 눌러도 Navigator command와 경로가 바뀌지 않고 전환 key, console command, UI가 제공되지 않는지 확인한다.
 - [ ] 3분: wall 근처에서 선박이 waypoint 부호에 맞는 쪽으로 우회하고 reverse 없이 final coast로 들어가는지 본다.
 - [ ] 3분: goal 반경에서 속도 `<=5 cm/s`가 된 뒤 Success가 한 번만 표시되고 input이 계속 0인지 본다.
 - [ ] 2분: PIE와 Editor를 종료하며 map과 config 저장을 선택하지 않는다.
@@ -1765,10 +1976,10 @@ git -C $Repo diff --name-only -- ShipAutonomySim/Content ShipAutonomySim/Config
 | terminal priority와 runtime error success 금지 | 4, 8 | `Terminal.Priority`, `GameMode.TerminalRuntimeError` |
 | Movement read-only speed와 blocking identity | 5 | `Movement.BlockingHitIdentity` |
 | actual wall hit만 gap 0, 다른 blocking은 Collision | 5, 8, 9 | hit identity unit test와 actual-world branch assertion |
-| 즉시 auto start와 manual mapping 제거 | 5, 8 | `Pawn.AutoStartRemovesManualMapping`, `GameMode.OptionBootstrap` |
+| 즉시 auto start와 manual mapping 제거 | 7, 8 | `Pawn.AutoStartRemovesManualMapping`, `GameMode.OptionBootstrap` |
 | stale input event와 W, S, A, D 직접 입력 무효 | 5 | `Pawn.StaleManualEventsIgnored`, `Pawn.DirectManualInputIgnoredDuringAutonomy` |
 | runtime targets 2개, wall actor, exact path와 refs | 6 | `Course.RuntimeSetupFailure`, actual-world setup count |
-| water reference, cube scale, collision, seed와 forced slide | 6 | course unit test와 11 forced cases |
+| actual wall world XY water reference, exclusion failure, cube scale, collision, time seed와 forced slide | 6 | `Course.RuntimeSetupFailure`와 11 forced cases |
 | Navigator가 두 input만 사용하고 direct transform 및 teleport 미사용 | 5, 7 | transform ownership 회귀와 source deny scan |
 | InitGame, BeginPlay, tick order, timeout, collision, logs | 8 | 두 GameMode unit tests와 actual-world test |
 | runtime error first-only log와 permanent safe stop | 7, 8, 9 | Navigator와 GameMode unit tests, separate actual count |
@@ -1801,15 +2012,30 @@ git -C $Repo diff --name-only -- ShipAutonomySim/Content ShipAutonomySim/Config
 - [ ] public signature가 고정 C++ 경계와 Task 본문에서 철자와 const 및 pointer type까지 같은지 확인한다.
 - [ ] terminal enum이 `Running`, `Success`, `Timeout`, `Collision` 네 값뿐인지 확인한다.
 - [ ] test 이름 32개가 모두 고유하고 Editor 31개와 game 1개의 context와 count가 일치하는지 확인한다.
-- [ ] Task 순서가 pure type, pure 계산, observation과 input transition, actor spawn, Navigator, GameMode, actual world 순서인지 확인한다.
+- [ ] Task 순서가 pure type, pure 계산, Movement observation과 Pawn private input latch, actor spawn, Navigator와 `EnterAutonomy`, GameMode, actual world 순서인지 확인한다. 각 Task는 그 시점까지 선언된 API만 사용하고 commit마다 독립 build 가능한지 확인한다.
 - [ ] include가 `Core`, `CoreUObject`, `Engine`, `InputCore`, `EnhancedInput`, `Water` 안에 있고 Build.cs 변경 계획이 없는지 확인한다.
+- [ ] 모든 public Unreal header에서 `.generated.h`가 마지막 include인지 확인한다.
+- [ ] Navigator의 Movement, wall, run owner와 GameMode의 ship, builder, collision identity가 정한 `UPROPERTY(Transient)` strong 또는 weak pointer 형태인지 확인한다.
+- [ ] lookahead, heading, throttle, coast, timeout, goal, success speed tuning 값이 기본값을 가진 `UPROPERTY(EditAnywhere, Category = ...)`인지 확인한다.
 - [ ] 모든 Windows path와 `ExecCmds` quoting, Automation prefix 1회, 마지막 `SoftQuit`, no-write `QUIT_EDITOR`를 확인한다.
 - [ ] 구현 완료, build 성공, Automation 통과를 현재 사실로 서술한 문장이 없는지 확인한다.
 - [ ] 미완성 표기, 가운데점 문자, required header 외 star 강조, 임의 branch 명명, 외부 service 전달 문구가 없는지 확인한다.
-- [ ] `git diff --check`가 통과하고 `git status --short`에 이 계획 파일만 나오는지 확인한다.
+- [ ] `git diff --check`가 통과하고 branch와 HEAD가 시작 게이트와 같으며 worktree가 clean이고 계획 파일이 tracked 상태인지 확인한다.
 
 ```powershell
 $Plan = 'docs/superpowers/plans/2026-08-09-ship-autonomy-navigation.md'
+$ExpectedBranch = 'feat/ship-autonomy-navigation'
+$ExpectedHead = '5bb13544cde567be17179b2c0b6bddd4ff98c26c'
+$ActualBranch = git branch --show-current
+$ActualHead = git rev-parse HEAD
+$Changed = @(git status --porcelain=v1)
+if ($ActualBranch -ne $ExpectedBranch -or $ActualHead -ne $ExpectedHead -or $Changed.Count -ne 0) {
+    throw "Plan gate mismatch branch=$ActualBranch head=$ActualHead changes=$($Changed.Count)"
+}
+git ls-files --error-unmatch -- $Plan | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw 'Plan file must already be tracked'
+}
 $Tasks = @(Select-String -LiteralPath $Plan -Pattern '^### Task [1-9]:' -Encoding UTF8)
 if ($Tasks.Count -ne 9) {
     throw "Expected 9 Tasks, found $($Tasks.Count)"
@@ -1841,15 +2067,12 @@ git diff --check
 if ($LASTEXITCODE -ne 0) {
     throw 'git diff --check failed'
 }
-$Changed = @(git status --short)
-if ($Changed.Count -ne 1 -or $Changed[0] -ne '?? docs/superpowers/plans/2026-08-09-ship-autonomy-navigation.md') {
-    throw "Unexpected plan-authoring changes: $($Changed -join ', ')"
-}
 ```
 
 ## 구현 시 확인할 동적 불확실성
 
-- MainLevel의 Ocean water query가 course origin에서 finite surface Z를 반환하고 reference surface가 시각적 수면과 일치하는지 actual-world setup gate로 확인한다.
+- MainLevel의 Ocean water query가 transformed actual wall world XY에서 exclusion volume 밖의 finite surface Z를 반환하고 reference surface가 시각적 수면과 일치하는지 actual-world setup gate로 확인한다.
+- 일반 Play를 연속 시작했을 때 `NAME_None` 초기화가 서로 다른 stored seed와 실제 slide를 생성하고 run당 `Stage4RandomCourse` log를 한 번만 남기는지 local log로 확인한다.
 - Stage 3 C1과 C2 parameter에서 11개 slide가 45초 안에 coast와 success에 도달하는지 측정한다. 상수 변경이 필요하면 pure curve와 stopping test를 먼저 갱신하고 설계 범위를 벗어난 reverse 또는 lateral model을 추가하지 않는다.
 - local runner에서 ClientContext test 발견과 non-seamless `OpenLevel` travel이 world identity 변경 및 15초 load deadline을 만족하는지 log와 unique ID로 확인한다.
 - hull gap이 매우 작은 양수일 때 floating-point tolerance로 0이 되지 않는지 local 8-corner test와 actual minimum 값으로 확인한다. actual wall identity hit만 정확한 0으로 취급한다.
