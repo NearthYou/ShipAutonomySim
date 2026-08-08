@@ -54,6 +54,124 @@ bool GetCompletedDistanceXY(
     }
     return true;
 }
+
+double Cross2D(
+    const FVector2D& Origin,
+    const FVector2D& First,
+    const FVector2D& Second)
+{
+    const FVector2D A = First - Origin;
+    const FVector2D B = Second - Origin;
+    return A.X * B.Y - A.Y * B.X;
+}
+
+bool IsFinitePoint(const FVector2D& Point)
+{
+    return FMath::IsFinite(Point.X) && FMath::IsFinite(Point.Y);
+}
+
+bool PointOnSegment(
+    const FVector2D& Point,
+    const FVector2D& Start,
+    const FVector2D& End)
+{
+    constexpr double Tolerance = 1e-9;
+    if (FMath::Abs(Cross2D(Start, End, Point)) > Tolerance)
+    {
+        return false;
+    }
+    return Point.X >= FMath::Min(Start.X, End.X) - Tolerance
+        && Point.X <= FMath::Max(Start.X, End.X) + Tolerance
+        && Point.Y >= FMath::Min(Start.Y, End.Y) - Tolerance
+        && Point.Y <= FMath::Max(Start.Y, End.Y) + Tolerance;
+}
+
+bool SegmentsIntersect(
+    const FVector2D& FirstStart,
+    const FVector2D& FirstEnd,
+    const FVector2D& SecondStart,
+    const FVector2D& SecondEnd)
+{
+    constexpr double Tolerance = 1e-9;
+    const double A = Cross2D(FirstStart, FirstEnd, SecondStart);
+    const double B = Cross2D(FirstStart, FirstEnd, SecondEnd);
+    const double C = Cross2D(SecondStart, SecondEnd, FirstStart);
+    const double D = Cross2D(SecondStart, SecondEnd, FirstEnd);
+    if (((A > Tolerance && B < -Tolerance)
+            || (A < -Tolerance && B > Tolerance))
+        && ((C > Tolerance && D < -Tolerance)
+            || (C < -Tolerance && D > Tolerance)))
+    {
+        return true;
+    }
+    return (FMath::Abs(A) <= Tolerance
+            && PointOnSegment(SecondStart, FirstStart, FirstEnd))
+        || (FMath::Abs(B) <= Tolerance
+            && PointOnSegment(SecondEnd, FirstStart, FirstEnd))
+        || (FMath::Abs(C) <= Tolerance
+            && PointOnSegment(FirstStart, SecondStart, SecondEnd))
+        || (FMath::Abs(D) <= Tolerance
+            && PointOnSegment(FirstEnd, SecondStart, SecondEnd));
+}
+
+bool ConvexHullContainsPoint(
+    const TArray<FVector2D>& Hull,
+    const FVector2D& Point)
+{
+    constexpr double Tolerance = 1e-9;
+    bool bSawPositive = false;
+    bool bSawNegative = false;
+    for (int32 Index = 0; Index < Hull.Num(); ++Index)
+    {
+        const double Cross = Cross2D(
+            Hull[Index], Hull[(Index + 1) % Hull.Num()], Point);
+        bSawPositive = bSawPositive || Cross > Tolerance;
+        bSawNegative = bSawNegative || Cross < -Tolerance;
+        if (bSawPositive && bSawNegative)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+double PointToSegmentDistance(
+    const FVector2D& Point,
+    const FVector2D& Start,
+    const FVector2D& End)
+{
+    const FVector2D Segment = End - Start;
+    const double LengthSquared = Segment.SizeSquared();
+    if (LengthSquared <= UE_DOUBLE_SMALL_NUMBER)
+    {
+        return FVector2D::Distance(Point, Start);
+    }
+    const double Fraction = FMath::Clamp(
+        FVector2D::DotProduct(Point - Start, Segment) / LengthSquared,
+        0.0,
+        1.0);
+    return FVector2D::Distance(Point, Start + Fraction * Segment);
+}
+
+double SegmentDistance(
+    const FVector2D& FirstStart,
+    const FVector2D& FirstEnd,
+    const FVector2D& SecondStart,
+    const FVector2D& SecondEnd)
+{
+    if (SegmentsIntersect(
+            FirstStart, FirstEnd, SecondStart, SecondEnd))
+    {
+        return 0.0;
+    }
+    return FMath::Min(
+        FMath::Min(
+            PointToSegmentDistance(FirstStart, SecondStart, SecondEnd),
+            PointToSegmentDistance(FirstEnd, SecondStart, SecondEnd)),
+        FMath::Min(
+            PointToSegmentDistance(SecondStart, FirstStart, FirstEnd),
+            PointToSegmentDistance(SecondEnd, FirstStart, FirstEnd)));
+}
 }
 
 FStage4SlideOptionResult ClassifySlideOption(
@@ -424,4 +542,204 @@ bool ComputeDynamicStoppingDistance(
     }
 
     return false;
+}
+
+void TransformBoxCornersToXY(
+    const FBox& LocalBox,
+    const FTransform& WorldTransform,
+    TArray<FVector2D>& OutWorldCorners)
+{
+    OutWorldCorners.Reset(8);
+    if (!LocalBox.IsValid)
+    {
+        return;
+    }
+    for (int32 XIndex = 0; XIndex < 2; ++XIndex)
+    {
+        for (int32 YIndex = 0; YIndex < 2; ++YIndex)
+        {
+            for (int32 ZIndex = 0; ZIndex < 2; ++ZIndex)
+            {
+                const FVector Local(
+                    XIndex == 0 ? LocalBox.Min.X : LocalBox.Max.X,
+                    YIndex == 0 ? LocalBox.Min.Y : LocalBox.Max.Y,
+                    ZIndex == 0 ? LocalBox.Min.Z : LocalBox.Max.Z);
+                const FVector World = WorldTransform.TransformPosition(Local);
+                OutWorldCorners.Emplace(World.X, World.Y);
+            }
+        }
+    }
+}
+
+bool BuildConvexHullXY(
+    const TArray<FVector2D>& Points,
+    TArray<FVector2D>& OutHull)
+{
+    OutHull.Reset();
+    TArray<FVector2D> Sorted = Points;
+    for (const FVector2D& Point : Sorted)
+    {
+        if (!IsFinitePoint(Point))
+        {
+            return false;
+        }
+    }
+    Sorted.Sort([](const FVector2D& Left, const FVector2D& Right)
+    {
+        return Left.X < Right.X
+            || (Left.X == Right.X && Left.Y < Right.Y);
+    });
+
+    TArray<FVector2D> Unique;
+    Unique.Reserve(Sorted.Num());
+    for (const FVector2D& Point : Sorted)
+    {
+        if (Unique.IsEmpty() || !Unique.Last().Equals(Point, 1e-9))
+        {
+            Unique.Add(Point);
+        }
+    }
+    if (Unique.Num() < 3)
+    {
+        return false;
+    }
+
+    TArray<FVector2D> Lower;
+    for (const FVector2D& Point : Unique)
+    {
+        while (Lower.Num() >= 2
+            && Cross2D(Lower[Lower.Num() - 2], Lower.Last(), Point) <= 1e-9)
+        {
+            Lower.Pop(EAllowShrinking::No);
+        }
+        Lower.Add(Point);
+    }
+
+    TArray<FVector2D> Upper;
+    for (int32 Index = Unique.Num() - 1; Index >= 0; --Index)
+    {
+        const FVector2D& Point = Unique[Index];
+        while (Upper.Num() >= 2
+            && Cross2D(Upper[Upper.Num() - 2], Upper.Last(), Point) <= 1e-9)
+        {
+            Upper.Pop(EAllowShrinking::No);
+        }
+        Upper.Add(Point);
+    }
+
+    Lower.Pop(EAllowShrinking::No);
+    Upper.Pop(EAllowShrinking::No);
+    OutHull = MoveTemp(Lower);
+    OutHull.Append(Upper);
+    return OutHull.Num() >= 3;
+}
+
+bool ComputeConvexHullGapCm(
+    const FBox& FirstLocalBox,
+    const FTransform& FirstWorldTransform,
+    const FBox& SecondLocalBox,
+    const FTransform& SecondWorldTransform,
+    double& OutGapCm)
+{
+    OutGapCm = 0.0;
+    TArray<FVector2D> FirstCorners;
+    TArray<FVector2D> SecondCorners;
+    TransformBoxCornersToXY(
+        FirstLocalBox, FirstWorldTransform, FirstCorners);
+    TransformBoxCornersToXY(
+        SecondLocalBox, SecondWorldTransform, SecondCorners);
+    TArray<FVector2D> FirstHull;
+    TArray<FVector2D> SecondHull;
+    if (!BuildConvexHullXY(FirstCorners, FirstHull)
+        || !BuildConvexHullXY(SecondCorners, SecondHull))
+    {
+        return false;
+    }
+
+    for (int32 FirstIndex = 0; FirstIndex < FirstHull.Num(); ++FirstIndex)
+    {
+        const FVector2D& FirstStart = FirstHull[FirstIndex];
+        const FVector2D& FirstEnd =
+            FirstHull[(FirstIndex + 1) % FirstHull.Num()];
+        for (int32 SecondIndex = 0;
+             SecondIndex < SecondHull.Num();
+             ++SecondIndex)
+        {
+            if (SegmentsIntersect(
+                    FirstStart,
+                    FirstEnd,
+                    SecondHull[SecondIndex],
+                    SecondHull[(SecondIndex + 1) % SecondHull.Num()]))
+            {
+                return true;
+            }
+        }
+    }
+    if (ConvexHullContainsPoint(FirstHull, SecondHull[0])
+        || ConvexHullContainsPoint(SecondHull, FirstHull[0]))
+    {
+        return true;
+    }
+
+    double MinimumDistanceCm = TNumericLimits<double>::Max();
+    for (int32 FirstIndex = 0; FirstIndex < FirstHull.Num(); ++FirstIndex)
+    {
+        const FVector2D& FirstStart = FirstHull[FirstIndex];
+        const FVector2D& FirstEnd =
+            FirstHull[(FirstIndex + 1) % FirstHull.Num()];
+        for (int32 SecondIndex = 0;
+             SecondIndex < SecondHull.Num();
+             ++SecondIndex)
+        {
+            MinimumDistanceCm = FMath::Min(
+                MinimumDistanceCm,
+                SegmentDistance(
+                    FirstStart,
+                    FirstEnd,
+                    SecondHull[SecondIndex],
+                    SecondHull[(SecondIndex + 1) % SecondHull.Num()]));
+        }
+    }
+    if (!FMath::IsFinite(MinimumDistanceCm)
+        || MinimumDistanceCm < 0.0)
+    {
+        return false;
+    }
+    OutGapCm = MinimumDistanceCm;
+    return true;
+}
+
+EShipRunResult SelectTerminalResult(const FShipTerminalInputs& Inputs)
+{
+    if (Inputs.bCollision)
+    {
+        return EShipRunResult::Collision;
+    }
+    if (Inputs.bSuccessConditions && !Inputs.bRuntimeCalculationError)
+    {
+        return EShipRunResult::Success;
+    }
+    if (Inputs.bTimeout)
+    {
+        return EShipRunResult::Timeout;
+    }
+    return EShipRunResult::Running;
+}
+
+bool LatchRuntimeCalculationError(
+    EShipRuntimeCalculationError Error,
+    FShipRuntimeErrorState& InOutState)
+{
+    if (Error == EShipRuntimeCalculationError::None)
+    {
+        return false;
+    }
+    ++InOutState.ReportCount;
+    if (InOutState.bLatched)
+    {
+        return false;
+    }
+    InOutState.bLatched = true;
+    InOutState.FirstError = Error;
+    return true;
 }

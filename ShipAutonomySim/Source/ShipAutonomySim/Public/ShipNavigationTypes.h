@@ -46,3 +46,11 @@ struct FShipPathProgress
     int32 ActiveSegmentIndex = 0;
     double MonotonicDistanceCm = 0.0;
 };
+
+struct FShipRuntimeErrorState
+{
+    bool bLatched = false;
+    EShipRuntimeCalculationError FirstError =
+        EShipRuntimeCalculationError::None;
+    int32 ReportCount = 0;
+};

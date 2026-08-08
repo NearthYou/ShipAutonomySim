@@ -32,6 +32,14 @@ struct FShipCourseDefinition
     TArray<FVector> WorldPath;
 };
 
+struct FShipTerminalInputs
+{
+    bool bCollision = false;
+    bool bSuccessConditions = false;
+    bool bTimeout = false;
+    bool bRuntimeCalculationError = false;
+};
+
 FStage4SlideOptionResult ClassifySlideOption(
     bool bHasOption,
     const FString& RawValue);
@@ -64,3 +72,20 @@ bool ComputeDynamicStoppingDistance(
     const FShipMotionParameters& Parameters,
     double InitialForwardSpeedCmPerSecond,
     double& OutStoppingDistanceCm);
+void TransformBoxCornersToXY(
+    const FBox& LocalBox,
+    const FTransform& WorldTransform,
+    TArray<FVector2D>& OutWorldCorners);
+bool BuildConvexHullXY(
+    const TArray<FVector2D>& Points,
+    TArray<FVector2D>& OutHull);
+bool ComputeConvexHullGapCm(
+    const FBox& FirstLocalBox,
+    const FTransform& FirstWorldTransform,
+    const FBox& SecondLocalBox,
+    const FTransform& SecondWorldTransform,
+    double& OutGapCm);
+EShipRunResult SelectTerminalResult(const FShipTerminalInputs& Inputs);
+bool LatchRuntimeCalculationError(
+    EShipRuntimeCalculationError Error,
+    FShipRuntimeErrorState& InOutState);

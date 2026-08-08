@@ -409,4 +409,222 @@ bool FShipDynamicStoppingDistanceTest::RunTest(const FString&)
     return !HasAnyErrors();
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipConvexHullGapTest,
+    "ShipAutonomySim.ShipNavigation.Unit.Geometry.ConvexHullGap",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipTerminalPriorityTest,
+    "ShipAutonomySim.ShipNavigation.Unit.Terminal.Priority",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipRuntimeCalculationErrorLatchTest,
+    "ShipAutonomySim.ShipNavigation.Unit.Terminal.RuntimeCalculationErrorLatch",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FShipConvexHullGapTest::RunTest(const FString&)
+{
+    const FBox UnitBox(FVector(-1.0), FVector(1.0));
+    struct FCase
+    {
+        const TCHAR* Label;
+        FBox FirstBox;
+        FTransform FirstTransform;
+        FBox SecondBox;
+        FTransform SecondTransform;
+        double ExpectedGapCm;
+    };
+    const TArray<FCase> Cases{
+        {
+            TEXT("axis aligned separation"),
+            UnitBox,
+            FTransform::Identity,
+            UnitBox,
+            FTransform(FVector(5.0, 0.0, 0.0)),
+            3.0,
+        },
+        {
+            TEXT("yaw rotated ship"),
+            FBox(FVector(-2.0, -1.0, -1.0), FVector(2.0, 1.0, 1.0)),
+            FTransform(FRotator(0.0, 45.0, 0.0)),
+            UnitBox,
+            FTransform(FVector(6.0, 0.0, 0.0)),
+            2.8786796564,
+        },
+        {
+            TEXT("scaled wall"),
+            UnitBox,
+            FTransform::Identity,
+            UnitBox,
+            FTransform(
+                FRotator::ZeroRotator,
+                FVector(6.0, 0.0, 0.0),
+                FVector(2.0, 3.0, 4.0)),
+            3.0,
+        },
+        {
+            TEXT("full pitch roll yaw and nonuniform scale"),
+            UnitBox,
+            FTransform(
+                FRotator(90.0, 90.0, 90.0),
+                FVector::ZeroVector,
+                FVector(2.0, 3.0, 4.0)),
+            UnitBox,
+            FTransform(FVector(10.0, 0.0, 0.0)),
+            5.0,
+        },
+        {
+            TEXT("touching edge"),
+            UnitBox,
+            FTransform::Identity,
+            UnitBox,
+            FTransform(FVector(2.0, 0.0, 0.0)),
+            0.0,
+        },
+        {
+            TEXT("overlapping hulls"),
+            UnitBox,
+            FTransform::Identity,
+            UnitBox,
+            FTransform(FVector(1.0, 0.0, 0.0)),
+            0.0,
+        },
+    };
+
+    for (const FCase& Case : Cases)
+    {
+        double GapCm = -1.0;
+        TestTrue(
+            *FString::Printf(TEXT("%s gap calculation"), Case.Label),
+            ComputeConvexHullGapCm(
+                Case.FirstBox,
+                Case.FirstTransform,
+                Case.SecondBox,
+                Case.SecondTransform,
+                GapCm));
+        TestTrue(
+            *FString::Printf(TEXT("%s gap"), Case.Label),
+            FMath::IsNearlyEqual(GapCm, Case.ExpectedGapCm, 1e-6));
+        TestTrue(
+            *FString::Printf(TEXT("%s gap non-negative"), Case.Label),
+            GapCm >= 0.0);
+    }
+
+    TArray<FVector2D> Corners;
+    TransformBoxCornersToXY(
+        UnitBox,
+        FTransform(
+            FRotator(90.0, 90.0, 90.0),
+            FVector::ZeroVector,
+            FVector(2.0, 3.0, 4.0)),
+        Corners);
+    TestEqual(TEXT("all local corners are transformed"), Corners.Num(), 8);
+    TArray<FVector2D> Hull;
+    TestTrue(TEXT("transformed corners build a hull"),
+        BuildConvexHullXY(Corners, Hull));
+    TestEqual(TEXT("axis-permuted cube hull has four corners"), Hull.Num(), 4);
+    double MinimumX = TNumericLimits<double>::Max();
+    double MaximumX = TNumericLimits<double>::Lowest();
+    double MinimumY = TNumericLimits<double>::Max();
+    double MaximumY = TNumericLimits<double>::Lowest();
+    for (const FVector2D& Point : Hull)
+    {
+        MinimumX = FMath::Min(MinimumX, Point.X);
+        MaximumX = FMath::Max(MaximumX, Point.X);
+        MinimumY = FMath::Min(MinimumY, Point.Y);
+        MaximumY = FMath::Max(MaximumY, Point.Y);
+    }
+    TestTrue(TEXT("pitch roll yaw maps scaled Z to world X"),
+        FMath::IsNearlyEqual(MinimumX, -4.0, 1e-6)
+        && FMath::IsNearlyEqual(MaximumX, 4.0, 1e-6));
+    TestTrue(TEXT("pitch roll yaw maps scaled Y to world Y"),
+        FMath::IsNearlyEqual(MinimumY, -3.0, 1e-6)
+        && FMath::IsNearlyEqual(MaximumY, 3.0, 1e-6));
+
+    return !HasAnyErrors();
+}
+
+bool FShipTerminalPriorityTest::RunTest(const FString&)
+{
+    for (int32 Mask = 0; Mask < 8; ++Mask)
+    {
+        const bool bCollision = (Mask & 1) != 0;
+        const bool bSuccess = (Mask & 2) != 0;
+        const bool bTimeout = (Mask & 4) != 0;
+        const EShipRunResult Expected = bCollision
+            ? EShipRunResult::Collision
+            : bSuccess
+                ? EShipRunResult::Success
+                : bTimeout
+                    ? EShipRunResult::Timeout
+                    : EShipRunResult::Running;
+        TestEqual(
+            *FString::Printf(TEXT("terminal priority mask %d"), Mask),
+            SelectTerminalResult(FShipTerminalInputs{
+                bCollision,
+                bSuccess,
+                bTimeout,
+                false}),
+            Expected);
+    }
+
+    TestEqual(TEXT("runtime error blocks success"),
+        SelectTerminalResult(FShipTerminalInputs{false, true, false, true}),
+        EShipRunResult::Running);
+    TestEqual(TEXT("runtime error preserves timeout"),
+        SelectTerminalResult(FShipTerminalInputs{false, true, true, true}),
+        EShipRunResult::Timeout);
+    TestEqual(TEXT("runtime error preserves collision"),
+        SelectTerminalResult(FShipTerminalInputs{true, true, true, true}),
+        EShipRunResult::Collision);
+
+    return !HasAnyErrors();
+}
+
+bool FShipRuntimeCalculationErrorLatchTest::RunTest(const FString&)
+{
+    FShipRuntimeErrorState State;
+    TestFalse(TEXT("None does not change latch"),
+        LatchRuntimeCalculationError(
+            EShipRuntimeCalculationError::None, State));
+    TestFalse(TEXT("None leaves latch clear"), State.bLatched);
+    TestEqual(TEXT("None leaves count zero"), State.ReportCount, 0);
+
+    TestTrue(TEXT("first error changes latch"),
+        LatchRuntimeCalculationError(
+            EShipRuntimeCalculationError::InvalidHeading, State));
+    TestTrue(TEXT("first error latches"), State.bLatched);
+    TestEqual(TEXT("first error is preserved"),
+        State.FirstError,
+        EShipRuntimeCalculationError::InvalidHeading);
+    TestEqual(TEXT("first error count"), State.ReportCount, 1);
+
+    TestFalse(TEXT("same error does not relatch"),
+        LatchRuntimeCalculationError(
+            EShipRuntimeCalculationError::InvalidHeading, State));
+    TestEqual(TEXT("same error increments count"), State.ReportCount, 2);
+    TestEqual(TEXT("same error preserves first"),
+        State.FirstError,
+        EShipRuntimeCalculationError::InvalidHeading);
+
+    TestFalse(TEXT("different error does not relatch"),
+        LatchRuntimeCalculationError(
+            EShipRuntimeCalculationError::InvalidThrottle, State));
+    TestEqual(TEXT("different error increments count"), State.ReportCount, 3);
+    TestEqual(TEXT("different error preserves first"),
+        State.FirstError,
+        EShipRuntimeCalculationError::InvalidHeading);
+    TestEqual(TEXT("latched error keeps success blocked"),
+        SelectTerminalResult(FShipTerminalInputs{
+            false,
+            true,
+            false,
+            State.bLatched}),
+        EShipRunResult::Running);
+
+    return !HasAnyErrors();
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
