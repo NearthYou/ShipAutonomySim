@@ -55,9 +55,79 @@
 - WaterBodyComponent.h: bool HasWaves() const, QueryWaterInfoClosestToWorldLocation(const FVector&, EWaterBodyQueryFlags, const TOptional<float>&) const
 - WaterBodyTypes.h: ComputeLocation, ComputeNormal, IncludeWaves, GetQueryFlags, GetWaterSurfaceLocation, GetWaterSurfaceNormal, IsInExclusionVolume
 - Enhanced Input: UInputMappingContext::MapKey(const UInputAction*, FKey), FEnhancedActionKeyMapping::Modifiers, AddMappingContext, RemoveMappingContext, Triggered, Completed, Canceled
+- GameInstance.h와 LocalPlayer.h: UGameInstance::InitializeStandalone, AddLocalPlayer, RemoveLocalPlayer, ULocalPlayer::SpawnPlayActor, ULocalPlayer::GetSubsystem
+- EnhancedInputSubsystems.h와 EnhancedInputSubsystemInterface.h: UEnhancedInputLocalPlayerSubsystem, HasMappingContext, FModifyContextOptions::bForceImmediately, RequestRebuildControlMappings
+- PlayerController.h와 PlayerInput.h: APlayerController::InputKey(const FInputKeyParams&), PlayerTick, FlushPressedKeys와 FInputKeyParams(FKey, EInputEvent, double, bool, FInputDeviceId)
+- World.h와 Actor.h: UWorld::SetGameMode(const FURL&), InitializeActorsForPlay(const FURL&), BeginPlay(), AActor::HasActorBegunPlay(). GameMode BeginPlay test는 이 정상 world lifecycle을 사용한다.
 - Actor.h: bool SetActorLocationAndRotation(FVector, const FQuat&, bool, FHitResult*, ETeleportType). bSweep가 true일 때 root component만 sweep한다.
 - RotationMatrix.h와 Matrix.h: FRotationMatrix::MakeFromXZ(XAxis, ZAxis).ToQuat()
 - AutomationTest.h: IMPLEMENT_SIMPLE_AUTOMATION_TEST(Class, PrettyName, Flags), EditorContext와 ProductFilter
+
+## 공통 TDD 검증 게이트
+
+각 Task의 RED 단계는 제품 구현 전에 아래 함수를 현재 PowerShell 세션에 정의한 뒤 해당 Task가 지정한 실패 패턴으로 호출한다. build가 성공하면 RED 실패로 처리하고 editor는 실행하지 않는다. 각 GREEN 단계는 같은 세션에 `Invoke-ShipGreenGate`를 정의한 뒤 기대 test 수 4, 6, 8, 11, 12를 넘긴다. 이 함수는 build exit 0을 확인하기 전에는 editor를 시작하지 않으며, 발견 수, Success 수, failure/error 수와 clean exit marker를 계산해 하나라도 계약과 다르면 throw한다. 새 tracked 검증 script는 만들지 않는다.
+
+~~~powershell
+function Invoke-ExpectedRedBuild {
+    param(
+        [Parameter(Mandatory=$true)][string]$Stage,
+        [Parameter(Mandatory=$true)][string]$ExpectedFailurePattern
+    )
+    $RepoRoot = (git rev-parse --show-toplevel).Trim()
+    if ($LASTEXITCODE -ne 0) { throw "No-Go: repository root unavailable" }
+    $EngineRoot = Join-Path $env:ProgramFiles "Epic Games/UE_5.5"
+    $Project = Join-Path $RepoRoot "ShipAutonomySim/ShipAutonomySim.uproject"
+    $BuildLog = Join-Path $RepoRoot "ShipAutonomySim/Saved/Logs/ShipMovement-$Stage-RED-build.log"
+    & "$EngineRoot/Engine/Build/BatchFiles/Build.bat" ShipAutonomySimEditor Win64 Development "-Project=$Project" -WaitMutex 2>&1 |
+        Tee-Object -FilePath $BuildLog
+    $BuildExit = $LASTEXITCODE
+    if ($BuildExit -eq 0) { throw "RED unexpectedly passed: $Stage" }
+    $BuildText = Get-Content -LiteralPath $BuildLog -Raw
+    if ($BuildText -notmatch $ExpectedFailurePattern) {
+        throw "RED failed for an unrelated reason: $Stage"
+    }
+}
+
+function Invoke-ShipGreenGate {
+    param(
+        [Parameter(Mandatory=$true)][ValidateRange(1,12)][int]$ExpectedTests,
+        [Parameter(Mandatory=$true)][string]$Stage
+    )
+    $RepoRoot = (git rev-parse --show-toplevel).Trim()
+    if ($LASTEXITCODE -ne 0) { throw "No-Go: repository root unavailable" }
+    $EngineRoot = Join-Path $env:ProgramFiles "Epic Games/UE_5.5"
+    $Project = Join-Path $RepoRoot "ShipAutonomySim/ShipAutonomySim.uproject"
+    $BuildLog = Join-Path $RepoRoot "ShipAutonomySim/Saved/Logs/ShipMovement-$Stage-build.log"
+    $AutomationLog = Join-Path $RepoRoot "ShipAutonomySim/Saved/Logs/ShipMovement-$Stage-automation.log"
+    $TrackedBefore = (git status --porcelain=v1 --untracked-files=no | Out-String)
+
+    & "$EngineRoot/Engine/Build/BatchFiles/Build.bat" ShipAutonomySimEditor Win64 Development "-Project=$Project" -WaitMutex 2>&1 |
+        Tee-Object -FilePath $BuildLog
+    $BuildExit = $LASTEXITCODE
+    if ($BuildExit -ne 0) { throw "No-Go: $Stage build failed with exit $BuildExit; editor was not started" }
+
+    & "$EngineRoot/Engine/Binaries/Win64/UnrealEditor-Cmd.exe" $Project -Unattended -NoSplash -NoSound -NullRHI -NoP4 -NoAssetRegistryCache -nowrite -NoAnalytics -NoEpicPortal -stdout -FullStdOutLogOutput "-abslog=$AutomationLog" '-ExecCmds=Automation RunTests ShipAutonomySim.ShipMovement;Automation Quit'
+    $EditorExit = $LASTEXITCODE
+    if ($EditorExit -ne 0) { throw "No-Go: $Stage automation process failed with exit $EditorExit" }
+
+    $LogText = Get-Content -LiteralPath $AutomationLog -Raw
+    $FoundMatches = [regex]::Matches($LogText, 'Found\s+(\d+)\s+automation tests')
+    $Found = if ($FoundMatches.Count -eq 0) { -1 } else { [int]$FoundMatches[$FoundMatches.Count - 1].Groups[1].Value }
+    $Success = [regex]::Matches($LogText, 'Test Completed.*Result=\{Success\}').Count
+    $Failure = [regex]::Matches($LogText, 'Test Completed.*Result=\{(?:Fail|Failed|Error|NotRun)\}').Count
+    $AutomationErrors = [regex]::Matches($LogText, '(?m)^.*(?:LogAutomationController|LogAutomationCommandLine):\s+Error:|Fatal error:').Count
+    $CleanExitMarkers = [regex]::Matches($LogText, 'LogExit: (?:Exiting\.|Editor shut down)').Count
+    if ($Found -ne $ExpectedTests -or $Success -ne $ExpectedTests -or
+        $Failure -ne 0 -or $AutomationErrors -ne 0 -or $CleanExitMarkers -lt 1) {
+        throw "No-Go: $Stage found=$Found success=$Success failure=$Failure errors=$AutomationErrors cleanExit=$CleanExitMarkers"
+    }
+
+    $TrackedAfter = (git status --porcelain=v1 --untracked-files=no | Out-String)
+    if ($TrackedBefore -cne $TrackedAfter) {
+        throw "No-Go: unexpected tracked change during $Stage; do not reset, restore, clean, or delete"
+    }
+}
+~~~
 
 ## Public and Private Interfaces
 
@@ -115,14 +185,14 @@ FShipSurfaceBasis BuildShipSurfaceBasis(
 | 편집 범위, 평형 속도, Euler 안정성, snapshot 전체 fallback | Task 1, Task 3 | Motion.ParameterValidation, runtime debug |
 | Water 파도 및 무파도, exclusion, invalid, component fallback | Task 2, Task 3 | Water.Classification, PIE water 상태 |
 | 경사 수면에서 world XY yaw를 보존하는 직교기저 | Task 2, Task 3 | Water.SurfaceBasis, PIE 횡경사 |
-| UShipMovement만 swept transform 변경, blocking hit speed 0 | Task 3 | Runtime.FallbackAndBlockingHit, Runtime.TransformOwnership |
+| UShipMovement만 swept transform 변경, blocking hit speed 0 | Task 3 | Runtime.FallbackAndBlockingHit, 전체 runtime mutator denylist와 exact whitelist |
 | 200 x 100 x 100 hull, 물리 비활성화, 3인칭 카메라 | Task 4 | Pawn.Construction, PIE |
 | runtime Enhanced Input WASD, UObject 수명, 양쪽 키 상쇄 | Task 4 | Pawn.InputLifecycle, PIE |
-| Completed, Canceled, focus loss, UnPossessed, EndPlay reset | Task 4 | Pawn.FocusLossAndAutopilotGuard, PIE |
-| 향후 autopilot 활성 중 수동 입력 무시, 같은 두 setter 사용 | Task 4 | private manual-active guard test와 code inspection |
-| GameMode test spawn, 중복 방지와 possession | Task 5 | GameMode.Bootstrap, PIE |
+| Completed, Canceled, focus loss, UnPossessed, EndPlay reset | Task 4 | 실제 controller event와 lifecycle, FlushPressedKeys automation, OS focus PIE |
+| 향후 autopilot 활성 중 수동 입력 무시, 같은 두 setter 사용 | Task 4 | queued Completed와 Canceled 뒤 setter 값 보존 |
+| GameMode test spawn, 중복 방지와 possession | Task 5 | 정상 BeginPlay 한 번과 idempotent helper 두 번, PIE |
 | 15, 30, 60, 120 FPS 합격표와 hitch | Task 1, Final Verification | 자동화 표와 PIE 기록 |
-| Build, 전체 자동화, no-write MainLevel과 tracked-change No-Go | Final Verification | 명령 exit, log, hash, Git 상태 |
+| full Build, 전체 자동화, no-write MainLevel과 tracked-change No-Go | Final Verification | project-scoped UBT clean, compile/link action, 강제 log count, hash/time/Git 상태 |
 
 ---
 
@@ -162,8 +232,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FShipMotionParameterValidationTest,
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FShipMotionFrameRatesAndHitchTest,
     "ShipAutonomySim.ShipMovement.Motion.FrameRatesAndHitch",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
-#endif
 ~~~
+
+이 `#if WITH_DEV_AUTOMATION_TESTS`는 여기서 닫지 않는다. Task 2부터 Task 5까지 추가되는 include, 12개 macro 선언, fixture, accessor와 모든 RunTest 본문을 같은 guard 안에 두고, 마지막 GameMode.Bootstrap RunTest 뒤에서 단 한 번 `#endif`로 닫는다.
 
 RunTest 본문은 다음 수치를 직접 단언한다.
 
@@ -190,9 +261,7 @@ TestTrue(TEXT("full-speed yaw rate"),
 - [ ] **Step 2: RED build 확인**
 
 ~~~powershell
-$RepoRoot = git rev-parse --show-toplevel
-$EngineRoot = Join-Path $env:ProgramFiles "Epic Games/UE_5.5"
-& "$EngineRoot/Engine/Build/BatchFiles/Build.bat" ShipAutonomySimEditor Win64 Development "-Project=$RepoRoot/ShipAutonomySim/ShipAutonomySim.uproject" -WaitMutex
+Invoke-ExpectedRedBuild -Stage "Task1" -ExpectedFailurePattern 'ShipMovementSimulation\.h|FShipMotionParameters|AdvanceShipMotion'
 ~~~
 
 Expected: ShipMovementSimulation.h가 아직 없어 compile 실패한다. 기존 ShipMovement 골격의 오류가 아니라 새 RED test가 요구한 seam 부재가 실패 원인이다.
@@ -500,15 +569,10 @@ FPS test는 다음 표를 코드의 data row로 사용한다.
 - [ ] **Step 7: GREEN build와 네 test 실행**
 
 ~~~powershell
-$RepoRoot = git rev-parse --show-toplevel
-$EngineRoot = Join-Path $env:ProgramFiles "Epic Games/UE_5.5"
-$Project = "$RepoRoot/ShipAutonomySim/ShipAutonomySim.uproject"
-$Log = "$RepoRoot/ShipAutonomySim/Saved/Logs/ShipMovement-Task1.log"
-& "$EngineRoot/Engine/Build/BatchFiles/Build.bat" ShipAutonomySimEditor Win64 Development "-Project=$Project" -WaitMutex
-& "$EngineRoot/Engine/Binaries/Win64/UnrealEditor-Cmd.exe" $Project -Unattended -NoSplash -NoSound -NullRHI -NoP4 -NoAssetRegistryCache -nowrite -NoAnalytics -NoEpicPortal -stdout -FullStdOutLogOutput "-abslog=$Log" '-ExecCmds=Automation RunTests ShipAutonomySim.ShipMovement.Motion;Automation Quit'
+Invoke-ShipGreenGate -ExpectedTests 4 -Stage "Task1"
 ~~~
 
-Expected: build exit 0, 네 test Result Success, 실패와 Error 0개.
+Expected: build exit 0 뒤 발견 4, Success 4, failure 및 automation error 0, clean exit marker 1개 이상이다.
 
 - [ ] **Step 8: Task 1 commit**
 
@@ -549,7 +613,11 @@ Classification은 ComputeLocation | ComputeNormal | IncludeWaves 결과를 만�
 
 - [ ] **Step 2: RED build 확인**
 
-Expected: 두 함수가 선언만 있고 정의되지 않아 link 실패한다.
+~~~powershell
+Invoke-ExpectedRedBuild -Stage "Task2" -ExpectedFailurePattern 'ResolveWaterSurfaceSample|BuildShipSurfaceBasis|unresolved external symbol'
+~~~
+
+Expected: 두 함수가 선언만 있고 정의되지 않은 link 실패를 확인하며 editor는 실행하지 않는다.
 
 - [ ] **Step 3: Water sample 분류 구현**
 
@@ -655,7 +723,11 @@ H (1,0,0)과 normalize(1,1,1), yaw 45와 normalize(0,1,1)에서 atan2 결과 yaw
 
 - [ ] **Step 6: 전체 순수 test와 회귀 실행**
 
-Task 1의 automation 명령에서 prefix를 ShipAutonomySim.ShipMovement로 바꿔 6개 test를 실행한다. Expected: 6개 Result Success, build exit 0.
+~~~powershell
+Invoke-ShipGreenGate -ExpectedTests 6 -Stage "Task2"
+~~~
+
+Expected: build exit 0 뒤 발견 6, Success 6, failure 및 automation error 0, clean exit marker 1개 이상이다.
 
 - [ ] **Step 7: Task 2 commit**
 
@@ -685,13 +757,14 @@ git commit -m "feat: 선박 수면 정렬 계산 구현" -m "변경 이유: Wate
 
 FallbackAndBlockingHit는 physics scene을 만든 transient UWorld에 box-root AActor와 UShipMovement를 등록한다. Water가 없는 상태에서 Z를 유지하며 X가 증가하는지 확인하고, WorldStatic box 앞에서 sweep 후 penetration 없이 speed 0과 남은 substep 중단을 확인한다.
 
-TransformOwnership은 FPaths::ProjectDir 기준 ShipPawn.cpp, SimGameMode.cpp, ShipNavigator.cpp를 읽어 SetActorLocation, SetActorRotation, SetActorLocationAndRotation, AddActorWorldOffset가 없는지 확인하고 ShipMovement.cpp에 swept SetActorLocationAndRotation이 있는지 확인한다.
+TransformOwnership은 `Source/ShipAutonomySim` 아래 runtime h와 cpp 전체를 재귀 검사하고 `Private/Tests`만 제외한다. actor 이동, teleport, actor local 및 world offset, scene component world 및 relative transform, MoveComponent 계열을 denylist로 검사한다. runtime 이동 whitelist는 ShipMovement.cpp의 swept `Owner->SetActorLocationAndRotation(NewLocation, NewRotation, true, &Hit, ETeleportType::None)` 한 문장뿐이다. actor/root 이동이 아닌 ShipPawn.cpp의 고정 child mesh scale과 camera boom 초기 pitch 두 문장은 각각 정확한 source line 한 건만 별도 whitelist한다. 다른 파일, 다른 receiver, 다른 인수 또는 추가 발생은 실패한다.
 
 ~~~cpp
 #include "Components/BoxComponent.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/PlayerController.h"
+#include "HAL/FileManager.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -705,14 +778,7 @@ public:
     FScopedShipTestWorld()
     {
         World = UWorld::CreateWorld(EWorldType::Game, false);
-        World->InitializeNewWorld(UWorld::InitializationValues()
-            .AllowAudioPlayback(false)
-            .RequiresHitProxies(false)
-            .CreatePhysicsScene(true)
-            .CreateNavigation(false)
-            .CreateAISystem(false)
-            .ShouldSimulatePhysics(false)
-            .SetTransactional(false));
+        check(World != nullptr && World->GetPhysicsScene() != nullptr);
     }
     ~FScopedShipTestWorld()
     {
@@ -745,9 +811,17 @@ struct FShipMovementTestAccessor
     {
         return Movement.SteerInput;
     }
+    static double Acceleration(const UShipMovement& Movement)
+    {
+        return Movement.LastAcceleration;
+    }
     static bool BlockingHit(const UShipMovement& Movement)
     {
         return Movement.bLastBlockingHit;
+    }
+    static int32 DebugDrawCalls(const UShipMovement& Movement)
+    {
+        return Movement.TestDebugDrawInvocationCount;
     }
 };
 
@@ -759,6 +833,126 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FShipTransformOwnershipTest,
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 ~~~
 
+TransformOwnership의 RunTest 본문은 다음과 같이 고정한다.
+
+~~~cpp
+bool FShipTransformOwnershipTest::RunTest(const FString&)
+{
+    const FString RuntimeRoot = FPaths::ConvertRelativePathToFull(
+        FPaths::ProjectDir() / TEXT("Source/ShipAutonomySim"));
+    TArray<FString> Files;
+    IFileManager::Get().FindFilesRecursive(Files, *RuntimeRoot, TEXT("*.h"), true, false);
+    IFileManager::Get().FindFilesRecursive(Files, *RuntimeRoot, TEXT("*.cpp"), true, false);
+
+    const TArray<FString> DeniedMutators = {
+        TEXT("SetActorTransform("), TEXT("SetActorLocation("),
+        TEXT("SetActorRotation("), TEXT("SetActorLocationAndRotation("),
+        TEXT("SetActorScale3D("), TEXT("TeleportTo("),
+        TEXT("AddActorWorldOffset("),
+        TEXT("AddActorLocalOffset("), TEXT("AddActorWorldRotation("),
+        TEXT("AddActorLocalRotation("), TEXT("AddActorWorldTransform("),
+        TEXT("AddActorLocalTransform("), TEXT("SetWorldTransform("),
+        TEXT("SetWorldLocation("), TEXT("SetWorldRotation("),
+        TEXT("SetWorldLocationAndRotation("), TEXT("SetWorldScale3D("),
+        TEXT("AddWorldOffset("),
+        TEXT("AddLocalOffset("), TEXT("AddWorldRotation("),
+        TEXT("AddLocalRotation("), TEXT("AddWorldTransform("),
+        TEXT("AddLocalTransform("), TEXT("MoveComponent("),
+        TEXT("MoveComponentImpl("), TEXT("SetRelativeTransform("),
+        TEXT("SetRelativeLocation("), TEXT("SetRelativeRotation("),
+        TEXT("SetRelativeLocationAndRotation("), TEXT("SetRelativeScale3D("),
+        TEXT("AddRelativeLocation("), TEXT("AddRelativeRotation("),
+        TEXT("AddRelativeTransform("), TEXT("K2_SetWorldLocation("),
+        TEXT("K2_SetWorldRotation("), TEXT("K2_SetWorldTransform("),
+        TEXT("K2_AddWorldOffset("), TEXT("K2_AddLocalOffset("),
+        TEXT("K2_AddWorldRotation("), TEXT("K2_AddLocalRotation(")
+    };
+    struct FAllowedLine
+    {
+        FString FileSuffix;
+        FString CompactLine;
+        int32 ExpectedCount;
+        int32 ActualCount = 0;
+    };
+    TArray<FAllowedLine> Allowed = {
+        {TEXT("/Private/ShipMovement.cpp"),
+         TEXT("Owner->SetActorLocationAndRotation("), 1},
+        {TEXT("/Private/ShipPawn.cpp"),
+         TEXT("VisualMesh->SetRelativeScale3D(FVector(2.0,1.0,1.0));"), 1},
+        {TEXT("/Private/ShipPawn.cpp"),
+         TEXT("CameraBoom->SetRelativeRotation(FRotator(CameraPitchDegrees,0.0,0.0));"), 1}
+    };
+    const auto Compact = [](FString Value)
+    {
+        Value.ReplaceInline(TEXT(" "), TEXT(""));
+        Value.ReplaceInline(TEXT("\t"), TEXT(""));
+        Value.ReplaceInline(TEXT("\r"), TEXT(""));
+        Value.ReplaceInline(TEXT("\n"), TEXT(""));
+        return Value;
+    };
+
+    FString ShipMovementSource;
+    for (const FString& File : Files)
+    {
+        FString NormalizedFile = File;
+        NormalizedFile.ReplaceInline(TEXT("\\"), TEXT("/"));
+        if (NormalizedFile.Contains(TEXT("/Private/Tests/")))
+        {
+            continue;
+        }
+        FString Source;
+        if (!TestTrue(*FString::Printf(TEXT("read %s"), *NormalizedFile),
+            FFileHelper::LoadFileToString(Source, *File)))
+        {
+            continue;
+        }
+        if (NormalizedFile.EndsWith(TEXT("/Private/ShipMovement.cpp")))
+        {
+            ShipMovementSource = Source;
+        }
+        TArray<FString> Lines;
+        Source.ParseIntoArrayLines(Lines, false);
+        for (int32 LineIndex = 0; LineIndex < Lines.Num(); ++LineIndex)
+        {
+            const FString CompactLine = Compact(Lines[LineIndex]);
+            for (const FString& Mutator : DeniedMutators)
+            {
+                if (!CompactLine.Contains(Mutator))
+                {
+                    continue;
+                }
+                bool bAllowed = false;
+                for (FAllowedLine& Entry : Allowed)
+                {
+                    if (NormalizedFile.EndsWith(Entry.FileSuffix) &&
+                        CompactLine == Entry.CompactLine)
+                    {
+                        ++Entry.ActualCount;
+                        bAllowed = true;
+                        break;
+                    }
+                }
+                if (!bAllowed)
+                {
+                    AddError(FString::Printf(TEXT("transform mutator denied: %s:%d: %s"),
+                        *NormalizedFile, LineIndex + 1, *Lines[LineIndex]));
+                }
+                break;
+            }
+        }
+    }
+    for (const FAllowedLine& Entry : Allowed)
+    {
+        TestEqual(*FString::Printf(TEXT("whitelist count %s"), *Entry.CompactLine),
+            Entry.ActualCount, Entry.ExpectedCount);
+    }
+    TestTrue(TEXT("only approved swept actor move statement"),
+        Compact(ShipMovementSource).Contains(
+            TEXT("Owner->SetActorLocationAndRotation(NewLocation,NewRotation,true,&Hit,ETeleportType::None);")));
+    return !HasAnyErrors();
+}
+~~~
+
 FallbackAndBlockingHit RunTest는 ship root를 ECC_Pawn QueryOnly, blocker root를 ECC_WorldStatic QueryOnly로 설정하고 서로 block하도록 만든다.
 
 ~~~cpp
@@ -768,6 +962,8 @@ FShipMovementTestAccessor::Tick(*Movement, 1.0f / 120.0f);
 TestTrue(TEXT("fallback moves horizontally"), Ship->GetActorLocation().X > 0.0);
 TestTrue(TEXT("fallback preserves Z"),
     FMath::Abs(Ship->GetActorLocation().Z - StartZ) <= 1e-6);
+TestEqual(TEXT("fallback tick draws debug exactly once"),
+    FShipMovementTestAccessor::DebugDrawCalls(*Movement), 1);
 
 Ship->SetActorLocation(FVector(0.0, 0.0, StartZ));
 Blocker->SetActorLocation(FVector(25.0, 0.0, StartZ));
@@ -778,11 +974,20 @@ TestTrue(TEXT("blocking hit recorded"),
 TestEqual(TEXT("blocking hit stops speed"),
     FShipMovementTestAccessor::Speed(*Movement), 0.0);
 TestTrue(TEXT("sweep prevents penetration"), Ship->GetActorLocation().X <= 5.01);
+const int32 BeforeInvalid = FShipMovementTestAccessor::DebugDrawCalls(*Movement);
+FShipMovementTestAccessor::Tick(
+    *Movement, std::numeric_limits<float>::quiet_NaN());
+TestEqual(TEXT("invalid tick draws debug exactly once"),
+    FShipMovementTestAccessor::DebugDrawCalls(*Movement), BeforeInvalid + 1);
 ~~~
 
 - [ ] **Step 2: RED build 확인**
 
-Expected: UShipMovement에 setter와 TickComponent 및 test accessor 상태가 없어 compile 실패한다.
+~~~powershell
+Invoke-ExpectedRedBuild -Stage "Task3" -ExpectedFailurePattern 'UShipMovement|SetThrottle|SetSteer|TickComponent|SetActorLocationAndRotation'
+~~~
+
+Expected: UShipMovement의 새 setter, TickComponent 또는 승인된 swept call 부재로 compile 또는 test 계약이 실패하고 editor는 실행하지 않는다.
 
 - [ ] **Step 3: UShipMovement public header 구현**
 
@@ -868,6 +1073,7 @@ private:
     void DrawMovementDebug() const;
 
 #if WITH_DEV_AUTOMATION_TESTS
+    mutable int32 TestDebugDrawInvocationCount = 0;
     friend struct FShipMovementTestAccessor;
 #endif
 };
@@ -883,6 +1089,7 @@ ShipMovement.h의 private 함수가 FShipMotionParameters를 반환하므로 cla
 #include "Engine/Engine.h"
 #include "GameFramework/Actor.h"
 #include "Math/RotationMatrix.h"
+#include "Misc/ScopeExit.h"
 #include "WaterBodyComponent.h"
 #include "WaterSubsystem.h"
 
@@ -970,9 +1177,30 @@ const EWaterBodyQueryFlags QueryFlags =
     EWaterBodyQueryFlags::IncludeWaves;
 ~~~
 
-Tick의 핵심 loop를 다음 순서로 구현한다.
+Tick의 핵심 loop를 다음 순서로 구현한다. `DrawMovementDebug` 호출은 함수 첫머리의 scope-exit 한 곳에만 둔다. 정상 처리, Water fallback, invalid DeltaTime, invalid motion과 blocking hit의 모든 제어 흐름이 같은 scope를 벗어나므로 frame당 정확히 한 번 호출된다. loop 안과 각 return 앞에는 별도 debug 호출을 넣지 않는다.
 
 ~~~cpp
+void UShipMovement::TickComponent(
+    float DeltaTime,
+    ELevelTick TickType,
+    FActorComponentTickFunction* ThisTickFunction)
+{
+Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+ON_SCOPE_EXIT
+{
+    DrawMovementDebug();
+};
+
+if (!IsValid(GetOwner()) || !IsValid(GetOwner()->GetRootComponent()) ||
+    !FMath::IsFinite(DeltaTime) || DeltaTime < 0.0f)
+{
+    SignedSpeedCmPerSecond = 0.0;
+    LastSubsteps = 0;
+    LastSimulatedDeltaTime = 0.0;
+    LastDroppedDeltaTime = 0.0;
+    return;
+}
+
 const FShipValidatedMotionParameters Validated =
     ValidateShipMotionParameters(BuildCandidateParameters());
 const FShipSubstepSchedule Schedule = BuildShipSubstepSchedule(
@@ -1076,6 +1304,7 @@ for (int32 StepIndex = 0; StepIndex < Schedule.NumSteps; ++StepIndex)
         break;
     }
 }
+}
 ~~~
 
 Loop 전후에 LastSubsteps, LastStepSeconds, simulated 및 dropped DeltaTime, Water와 parameter state를 저장한다. dropped가 0에서 양수로 전환될 때만 warning을 남기고 다음 tick에 시간을 더하지 않는다. Water와 parameter state도 값이 바뀔 때만 로그를 남긴다.
@@ -1114,6 +1343,9 @@ const TCHAR* ParameterStateName(uint8 Value)
 
 void UShipMovement::DrawMovementDebug() const
 {
+#if WITH_DEV_AUTOMATION_TESTS
+    ++TestDebugDrawInvocationCount;
+#endif
 #if !UE_BUILD_SHIPPING
     if (!bShowMovementDebug || !GEngine)
     {
@@ -1142,7 +1374,11 @@ void UShipMovement::DrawMovementDebug() const
 
 - [ ] **Step 7: runtime test GREEN과 전체 회귀**
 
-Task 1 명령의 test prefix를 ShipAutonomySim.ShipMovement로 바꾼다. Expected: 8개 Result Success. Runtime collision test는 sweep 위치 유지, speed 0, remaining substep 중단을 단언한다.
+~~~powershell
+Invoke-ShipGreenGate -ExpectedTests 8 -Stage "Task3"
+~~~
+
+Expected: build exit 0 뒤 발견 8, Success 8, failure 및 automation error 0, clean exit marker 1개 이상이다. Runtime test는 fallback, invalid 입력과 blocking hit tick에서 debug call 증가가 각각 정확히 1이고, sweep 위치 유지, speed 0과 remaining substep 중단을 단언한다.
 
 - [ ] **Step 8: Task 3 commit**
 
@@ -1169,11 +1405,22 @@ git commit -m "feat: 선박 이동 컴포넌트 완성" -m "변경 이유: 수�
 - Produces: ResetManualInput, DeactivateManualInput, runtime Axis1D actions와 mapping
 - Produces tests: ShipAutonomySim.ShipMovement.Pawn.Construction, Pawn.InputLifecycle, Pawn.FocusLossAndAutopilotGuard
 
-- [ ] **Step 1: Pawn RED test 세 개와 ini 계약 추가**
+- [ ] **Step 1: 실제 LocalPlayer 입력 fixture와 Pawn RED test 세 개 추가**
 
-Construction은 root extent 100,50,50, visual scale 2,1,1, collision 및 physics off, movement, spring arm과 camera 존재를 단언한다. InputLifecycle은 W/S와 D/A 네 mapping, negate modifier, Cumulative Axis1D, Completed와 Canceled reset, UnPossessed와 EndPlay 멱등 해제를 검사한다. FocusLossAndAutopilotGuard는 ini 세 값, inactive manual handler 무시와 다음 입력 event부터 재개되는 경계를 검사한다.
+Construction은 root extent 100,50,50, visual scale 2,1,1, collision과 physics off, movement, spring arm과 camera 존재를 단언한다. 나머지 두 test는 private handler를 직접 호출하지 않는다. UE 5.5.4의 정상 경로대로 GameInstance에 LocalPlayer를 등록하고, project GameMode로 world actor를 초기화하고, `ULocalPlayer::SpawnPlayActor`가 만든 local APlayerController와 실제 `UEnhancedInputLocalPlayerSubsystem`, `UEnhancedPlayerInput`, `UEnhancedInputComponent`를 사용한다. 키 입력은 `APlayerController::InputKey(FInputKeyParams(...))` 뒤 `PlayerTick`으로 처리한다.
 
 ~~~cpp
+#include "Engine/Engine.h"
+#include "Engine/GameInstance.h"
+#include "Engine/LocalPlayer.h"
+#include "Engine/URL.h"
+#include "EnhancedInputComponent.h"
+#include "EnhancedInputSubsystems.h"
+#include "EnhancedPlayerInput.h"
+#include "GameFramework/PlayerController.h"
+#include "InputCoreTypes.h"
+#include "InputTriggers.h"
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FShipPawnConstructionTest,
     "ShipAutonomySim.ShipMovement.Pawn.Construction",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
@@ -1184,68 +1431,261 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FShipPawnFocusLossTest,
     "ShipAutonomySim.ShipMovement.Pawn.FocusLossAndAutopilotGuard",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+class FScopedShipInputWorld
+{
+public:
+    static constexpr float InputFrameSeconds = 1.0f / 60.0f;
+
+    FScopedShipInputWorld()
+    {
+        GameInstance = NewObject<UGameInstance>(GEngine);
+        GameInstance->AddToRoot();
+        const FName WorldName = MakeUniqueObjectName(
+            GetTransientPackage(), UWorld::StaticClass(), TEXT("ShipInputAutomationWorld"));
+        GameInstance->InitializeStandalone(WorldName, GetTransientPackage());
+        World = GameInstance->GetWorld();
+        check(World != nullptr && World->SetGameMode(FURL()));
+
+        LocalPlayer = NewObject<ULocalPlayer>(GEngine, GEngine->LocalPlayerClass);
+        check(GameInstance->AddLocalPlayer(LocalPlayer, 0) == 0);
+        World->InitializeActorsForPlay(FURL());
+        FString SpawnError;
+        check(LocalPlayer->SpawnPlayActor(TEXT(""), SpawnError, World));
+        Controller = LocalPlayer->GetPlayerController(World);
+        Subsystem = LocalPlayer->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>();
+        check(Controller != nullptr && Subsystem != nullptr);
+        check(Cast<UEnhancedPlayerInput>(Controller->PlayerInput) != nullptr);
+        check(Cast<UEnhancedInputComponent>(Controller->InputComponent) != nullptr);
+    }
+
+    ~FScopedShipInputWorld()
+    {
+        if (World != nullptr && World->HasBegunPlay())
+        {
+            World->EndPlay(EEndPlayReason::Quit);
+        }
+        if (GameInstance != nullptr)
+        {
+            GameInstance->Shutdown();
+            GameInstance->RemoveFromRoot();
+        }
+        if (World != nullptr)
+        {
+            GEngine->DestroyWorldContext(World);
+            World->DestroyWorld(false);
+        }
+    }
+
+    void StartPlay()
+    {
+        if (!World->HasBegunPlay())
+        {
+            World->BeginPlay();
+        }
+    }
+
+    AShipPawn& PossessShip()
+    {
+        StartPlay();
+        AShipPawn* Ship = Cast<AShipPawn>(Controller->GetPawn());
+        if (Ship == nullptr)
+        {
+            Ship = World->SpawnActor<AShipPawn>();
+            Controller->Possess(Ship);
+        }
+        TickInput();
+        check(Ship != nullptr && Ship->HasActorBegunPlay());
+        check(Cast<UEnhancedInputComponent>(Ship->InputComponent) != nullptr);
+        return *Ship;
+    }
+
+    void Press(const FKey& Key)
+    {
+        Controller->InputKey(FInputKeyParams(Key, IE_Pressed, 1.0));
+        TickInput();
+    }
+
+    void QueueRelease(const FKey& Key)
+    {
+        Controller->InputKey(FInputKeyParams(Key, IE_Released, 0.0));
+    }
+
+    void Release(const FKey& Key)
+    {
+        QueueRelease(Key);
+        TickInput();
+    }
+
+    void TickInput()
+    {
+        Controller->PlayerTick(InputFrameSeconds);
+    }
+
+    UGameInstance* GameInstance = nullptr;
+    UWorld* World = nullptr;
+    ULocalPlayer* LocalPlayer = nullptr;
+    APlayerController* Controller = nullptr;
+    UEnhancedInputLocalPlayerSubsystem* Subsystem = nullptr;
+};
+
 struct FShipPawnTestAccessor
 {
-    static void BuildInput(AShipPawn& Pawn) { Pawn.BuildManualInputObjects(); }
     static UShipMovement& Movement(AShipPawn& Pawn) { return *Pawn.ShipMovement; }
-    static UInputMappingContext& Mapping(AShipPawn& Pawn)
+    static UInputMappingContext& Mapping(AShipPawn& Pawn) { return *Pawn.ManualControlMapping; }
+    static int32 MappingRemovalCount(const AShipPawn& Pawn)
     {
-        return *Pawn.ManualControlMapping;
+        return Pawn.TestManualMappingRemovalCount;
     }
-    static void SetManualActive(AShipPawn& Pawn, bool bActive)
+    static int32 ThrottleCompletedCount(const AShipPawn& Pawn)
     {
-        Pawn.bManualInputActive = bActive;
+        return Pawn.TestThrottleCompletedCount;
     }
-    static void TriggerThrottle(AShipPawn& Pawn, float Value)
+    static int32 SteerCanceledCount(const AShipPawn& Pawn)
     {
-        Pawn.HandleThrottle(FInputActionValue(Value));
+        return Pawn.TestSteerCanceledCount;
     }
-    static void ReleaseThrottle(AShipPawn& Pawn) { Pawn.HandleThrottleReleased(); }
-    static void Deactivate(AShipPawn& Pawn) { Pawn.DeactivateManualInput(); }
+    static void ConfigureSteerAsOngoingHold(
+        AShipPawn& Pawn, UEnhancedInputLocalPlayerSubsystem& Subsystem)
+    {
+        UInputTriggerHold* Hold = NewObject<UInputTriggerHold>(Pawn.SteerAction);
+        Hold->HoldTimeThreshold = 10.0f;
+        Pawn.SteerAction->Triggers.Add(Hold);
+        FModifyContextOptions Options;
+        Options.bForceImmediately = true;
+        Subsystem.RequestRebuildControlMappings(Options);
+    }
+    static void DeactivateForAutopilot(AShipPawn& Pawn)
+    {
+        Pawn.DeactivateManualInput();
+    }
 };
 ~~~
 
-InputLifecycle의 핵심 단언은 다음과 같다.
+InputLifecycle은 실제 Completed, Canceled, UnPossessed, EndPlay와 mapping 제거를 다음처럼 실행한다. 첫 fixture의 W release는 Triggered 뒤 Completed를 발생시키고 `UnPossess`가 reset과 한 번의 context 제거를 수행한다. 두 번째 fixture는 test-only로 steer action을 긴 Hold 상태로 재구성해 Ongoing에서 release하도록 하며 실제 Canceled binding을 통과시킨다. 세 번째 fixture의 `Destroy()`는 AActor의 정상 EndPlay 경로를 실행한다.
 
 ~~~cpp
-AShipPawn* Pawn = TestWorld.World->SpawnActor<AShipPawn>();
-FShipPawnTestAccessor::BuildInput(*Pawn);
-TestEqual(TEXT("four WASD mappings"),
-    FShipPawnTestAccessor::Mapping(*Pawn).GetMappings().Num(), 4);
-FShipPawnTestAccessor::SetManualActive(*Pawn, true);
-FShipPawnTestAccessor::TriggerThrottle(*Pawn, 1.0f);
-TestEqual(TEXT("manual throttle forwarded"),
-    FShipMovementTestAccessor::Throttle(
-        FShipPawnTestAccessor::Movement(*Pawn)), 1.0);
-FShipPawnTestAccessor::ReleaseThrottle(*Pawn);
-TestEqual(TEXT("completed or canceled resets throttle"),
-    FShipMovementTestAccessor::Throttle(
-        FShipPawnTestAccessor::Movement(*Pawn)), 0.0);
-FShipPawnTestAccessor::Deactivate(*Pawn);
-FShipPawnTestAccessor::TriggerThrottle(*Pawn, 1.0f);
-TestEqual(TEXT("inactive manual input ignored"),
-    FShipMovementTestAccessor::Throttle(
-        FShipPawnTestAccessor::Movement(*Pawn)), 0.0);
-FShipPawnTestAccessor::Deactivate(*Pawn);
+bool FShipPawnInputLifecycleTest::RunTest(const FString&)
+{
+    {
+        FScopedShipInputWorld Input;
+        AShipPawn& Pawn = Input.PossessShip();
+        TestEqual(TEXT("four WASD mappings"),
+            FShipPawnTestAccessor::Mapping(Pawn).GetMappings().Num(), 4);
+        TestTrue(TEXT("context registered"),
+            Input.Subsystem->HasMappingContext(&FShipPawnTestAccessor::Mapping(Pawn)));
+        Input.Press(EKeys::W);
+        TestEqual(TEXT("Triggered forwards throttle"),
+            FShipMovementTestAccessor::Throttle(FShipPawnTestAccessor::Movement(Pawn)), 1.0);
+        Input.Release(EKeys::W);
+        TestEqual(TEXT("Completed resets throttle"),
+            FShipMovementTestAccessor::Throttle(FShipPawnTestAccessor::Movement(Pawn)), 0.0);
+        TestEqual(TEXT("Completed handler count"),
+            FShipPawnTestAccessor::ThrottleCompletedCount(Pawn), 1);
+
+        Input.Press(EKeys::W);
+        Input.Controller->UnPossess();
+        TestEqual(TEXT("UnPossessed resets throttle"),
+            FShipMovementTestAccessor::Throttle(FShipPawnTestAccessor::Movement(Pawn)), 0.0);
+        TestEqual(TEXT("UnPossessed removes context once"),
+            FShipPawnTestAccessor::MappingRemovalCount(Pawn), 1);
+        TestFalse(TEXT("context removed"),
+            Input.Subsystem->HasMappingContext(&FShipPawnTestAccessor::Mapping(Pawn)));
+    }
+    {
+        FScopedShipInputWorld Input;
+        AShipPawn& Pawn = Input.PossessShip();
+        FShipPawnTestAccessor::ConfigureSteerAsOngoingHold(Pawn, *Input.Subsystem);
+        Input.Press(EKeys::D);
+        Input.Release(EKeys::D);
+        TestEqual(TEXT("Canceled binding executed"),
+            FShipPawnTestAccessor::SteerCanceledCount(Pawn), 1);
+        Input.Controller->UnPossess();
+        TestEqual(TEXT("Canceled fixture lifecycle removes context once"),
+            FShipPawnTestAccessor::MappingRemovalCount(Pawn), 1);
+    }
+    {
+        FScopedShipInputWorld Input;
+        AShipPawn& Pawn = Input.PossessShip();
+        Input.Press(EKeys::W);
+        Pawn.Destroy();
+        TestEqual(TEXT("EndPlay resets throttle"),
+            FShipMovementTestAccessor::Throttle(FShipPawnTestAccessor::Movement(Pawn)), 0.0);
+        TestEqual(TEXT("EndPlay removes context once"),
+            FShipPawnTestAccessor::MappingRemovalCount(Pawn), 1);
+    }
+    return true;
+}
 ~~~
 
-FocusLossAndAutopilotGuard는 다음 config 원문과 inactive handler를 함께 확인한다.
+FocusLossAndAutopilotGuard는 headless automation이 OS window focus를 만들었다고 가장하지 않는다. 먼저 ini가 viewport focus loss에서 `APlayerController::FlushPressedKeys()`로 이어지는 engine policy를 켰는지 확인한다. 그런 다음 같은 controller의 검증된 `FlushPressedKeys()` 경로를 실제로 실행하고 다음 movement step이 thrust와 steer 없이 drag만 적용하는지 단언한다. 실제 viewport focus 이동은 Final Verification의 PIE 항목에서 별도로 확인한다. 두 번째 fixture는 release를 queue한 뒤 manual mode를 비활성화하고 autopilot 값을 두 setter로 기록한 다음 Completed와 Canceled를 처리해 늦은 release가 값을 지우지 않는지 검사한다.
 
 ~~~cpp
-FString InputConfig;
-TestTrue(TEXT("DefaultInput.ini readable"), FFileHelper::LoadFileToString(
-    InputConfig, *(FPaths::ProjectConfigDir() / TEXT("DefaultInput.ini"))));
-TestTrue(TEXT("enhanced player input"),
-    InputConfig.Contains(TEXT("DefaultPlayerInputClass=/Script/EnhancedInput.EnhancedPlayerInput")));
-TestTrue(TEXT("enhanced component"),
-    InputConfig.Contains(TEXT("DefaultInputComponentClass=/Script/EnhancedInput.EnhancedInputComponent")));
-TestTrue(TEXT("focus loss flush"),
-    InputConfig.Contains(TEXT("bShouldFlushPressedKeysOnViewportFocusLost=True")));
+bool FShipPawnFocusLossTest::RunTest(const FString&)
+{
+    FString InputConfig;
+    TestTrue(TEXT("DefaultInput.ini readable"), FFileHelper::LoadFileToString(
+        InputConfig, *(FPaths::ProjectConfigDir() / TEXT("DefaultInput.ini"))));
+    TestTrue(TEXT("enhanced player input"), InputConfig.Contains(
+        TEXT("DefaultPlayerInputClass=/Script/EnhancedInput.EnhancedPlayerInput")));
+    TestTrue(TEXT("enhanced component"), InputConfig.Contains(
+        TEXT("DefaultInputComponentClass=/Script/EnhancedInput.EnhancedInputComponent")));
+    TestTrue(TEXT("focus loss requests pressed-key flush"), InputConfig.Contains(
+        TEXT("bShouldFlushPressedKeysOnViewportFocusLost=True")));
+
+    {
+        FScopedShipInputWorld Input;
+        AShipPawn& Pawn = Input.PossessShip();
+        UShipMovement& Movement = FShipPawnTestAccessor::Movement(Pawn);
+        Input.Press(EKeys::W);
+        Input.Press(EKeys::D);
+        FShipMovementTestAccessor::SetState(Movement, 100.0, 0.0);
+        Input.Controller->FlushPressedKeys();
+        Input.TickInput();
+        FShipMovementTestAccessor::Tick(Movement, 1.0f / 120.0f);
+        TestEqual(TEXT("flush clears throttle"),
+            FShipMovementTestAccessor::Throttle(Movement), 0.0);
+        TestEqual(TEXT("flush clears steer"),
+            FShipMovementTestAccessor::Steer(Movement), 0.0);
+        const double ExpectedDrag =
+            -(0.447501534 * 100.0 + 0.000400390770 * 100.0 * 100.0);
+        TestTrue(TEXT("next motion step is drag only"),
+            FMath::Abs(FShipMovementTestAccessor::Acceleration(Movement) - ExpectedDrag) <= 1e-8);
+    }
+    {
+        FScopedShipInputWorld Input;
+        AShipPawn& Pawn = Input.PossessShip();
+        UShipMovement& Movement = FShipPawnTestAccessor::Movement(Pawn);
+        FShipPawnTestAccessor::ConfigureSteerAsOngoingHold(Pawn, *Input.Subsystem);
+        Input.Press(EKeys::W);
+        Input.Press(EKeys::D);
+        const int32 CompletedBefore = FShipPawnTestAccessor::ThrottleCompletedCount(Pawn);
+        const int32 CanceledBefore = FShipPawnTestAccessor::SteerCanceledCount(Pawn);
+        Input.QueueRelease(EKeys::W);
+        Input.QueueRelease(EKeys::D);
+        FShipPawnTestAccessor::DeactivateForAutopilot(Pawn);
+        Movement.SetThrottle(0.65f);
+        Movement.SetSteer(-0.25f);
+        Input.TickInput();
+        TestEqual(TEXT("late Completed was delivered"),
+            FShipPawnTestAccessor::ThrottleCompletedCount(Pawn), CompletedBefore + 1);
+        TestEqual(TEXT("late Canceled was delivered"),
+            FShipPawnTestAccessor::SteerCanceledCount(Pawn), CanceledBefore + 1);
+        TestTrue(TEXT("late release preserves autopilot throttle"),
+            FMath::Abs(FShipMovementTestAccessor::Throttle(Movement) - 0.65) <= 1e-6);
+        TestTrue(TEXT("late release preserves autopilot steer"),
+            FMath::Abs(FShipMovementTestAccessor::Steer(Movement) + 0.25) <= 1e-6);
+    }
+    return true;
+}
 ~~~
 
 - [ ] **Step 2: RED build 확인**
 
-Expected: AShipPawn의 component, input lifecycle과 DefaultInput.ini가 없어 test 실패한다.
+~~~powershell
+Invoke-ExpectedRedBuild -Stage "Task4" -ExpectedFailurePattern 'AShipPawn|ManualControlMapping|TestManualMappingRemovalCount|DefaultInput|UEnhancedInput'
+~~~
+
+Expected: AShipPawn의 component, 실제 input lifecycle seam 또는 DefaultInput 계약 부재로 build가 실패하고 editor는 실행하지 않는다.
 
 - [ ] **Step 3: Pawn header의 소유권과 lifecycle 선언**
 
@@ -1313,10 +1753,19 @@ private:
     void DeactivateManualInput();
     void HandleThrottle(const FInputActionValue& Value);
     void HandleSteer(const FInputActionValue& Value);
+    void HandleThrottleCompleted();
+    void HandleThrottleCanceled();
+    void HandleSteerCompleted();
+    void HandleSteerCanceled();
     void HandleThrottleReleased();
     void HandleSteerReleased();
 
 #if WITH_DEV_AUTOMATION_TESTS
+    int32 TestManualMappingRemovalCount = 0;
+    int32 TestThrottleCompletedCount = 0;
+    int32 TestThrottleCanceledCount = 0;
+    int32 TestSteerCompletedCount = 0;
+    int32 TestSteerCanceledCount = 0;
     friend struct FShipPawnTestAccessor;
 #endif
 };
@@ -1424,15 +1873,15 @@ void AShipPawn::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
     Enhanced->BindAction(ThrottleAction, ETriggerEvent::Triggered,
         this, &AShipPawn::HandleThrottle);
     Enhanced->BindAction(ThrottleAction, ETriggerEvent::Completed,
-        this, &AShipPawn::HandleThrottleReleased);
+        this, &AShipPawn::HandleThrottleCompleted);
     Enhanced->BindAction(ThrottleAction, ETriggerEvent::Canceled,
-        this, &AShipPawn::HandleThrottleReleased);
+        this, &AShipPawn::HandleThrottleCanceled);
     Enhanced->BindAction(SteerAction, ETriggerEvent::Triggered,
         this, &AShipPawn::HandleSteer);
     Enhanced->BindAction(SteerAction, ETriggerEvent::Completed,
-        this, &AShipPawn::HandleSteerReleased);
+        this, &AShipPawn::HandleSteerCompleted);
     Enhanced->BindAction(SteerAction, ETriggerEvent::Canceled,
-        this, &AShipPawn::HandleSteerReleased);
+        this, &AShipPawn::HandleSteerCanceled);
     Subsystem->AddMappingContext(ManualControlMapping, 0);
     RegisteredInputSubsystem = Subsystem;
     bManualMappingRegistered = true;
@@ -1457,6 +1906,9 @@ void AShipPawn::DeactivateManualInput()
         IsValid(ManualControlMapping))
     {
         RegisteredInputSubsystem->RemoveMappingContext(ManualControlMapping);
+#if WITH_DEV_AUTOMATION_TESTS
+        ++TestManualMappingRemovalCount;
+#endif
     }
     bManualMappingRegistered = false;
     RegisteredInputSubsystem.Reset();
@@ -1478,8 +1930,53 @@ void AShipPawn::HandleSteer(const FInputActionValue& Value)
     }
 }
 
-void AShipPawn::HandleThrottleReleased() { ShipMovement->SetThrottle(0.0f); }
-void AShipPawn::HandleSteerReleased() { ShipMovement->SetSteer(0.0f); }
+void AShipPawn::HandleThrottleCompleted()
+{
+#if WITH_DEV_AUTOMATION_TESTS
+    ++TestThrottleCompletedCount;
+#endif
+    HandleThrottleReleased();
+}
+
+void AShipPawn::HandleThrottleCanceled()
+{
+#if WITH_DEV_AUTOMATION_TESTS
+    ++TestThrottleCanceledCount;
+#endif
+    HandleThrottleReleased();
+}
+
+void AShipPawn::HandleSteerCompleted()
+{
+#if WITH_DEV_AUTOMATION_TESTS
+    ++TestSteerCompletedCount;
+#endif
+    HandleSteerReleased();
+}
+
+void AShipPawn::HandleSteerCanceled()
+{
+#if WITH_DEV_AUTOMATION_TESTS
+    ++TestSteerCanceledCount;
+#endif
+    HandleSteerReleased();
+}
+
+void AShipPawn::HandleThrottleReleased()
+{
+    if (bManualInputActive)
+    {
+        ShipMovement->SetThrottle(0.0f);
+    }
+}
+
+void AShipPawn::HandleSteerReleased()
+{
+    if (bManualInputActive)
+    {
+        ShipMovement->SetSteer(0.0f);
+    }
+}
 
 void AShipPawn::UnPossessed()
 {
@@ -1494,7 +1991,7 @@ void AShipPawn::EndPlay(const EEndPlayReason::Type EndPlayReason)
 }
 ~~~
 
-향후 autopilot 전환은 먼저 DeactivateManualInput으로 남은 키 값을 지운 뒤 같은 두 setter를 호출한다. bManualInputActive가 false인 동안 Enhanced Input handler가 값을 무시하며 3단계에는 공개 autopilot 전환 함수나 UShipNavigator 변경을 추가하지 않는다.
+향후 autopilot 전환은 먼저 `DeactivateManualInput()`이 `ResetManualInput()`을 직접 호출해 남은 키 값을 지운 뒤 같은 두 setter를 호출한다. 값 handler뿐 아니라 Completed와 Canceled가 공유하는 두 release handler도 `bManualInputActive`가 false이면 아무 값도 쓰지 않는다. 따라서 mode 전환 뒤 배달된 늦은 release가 autopilot setter 값을 지울 수 없다. 3단계에는 공개 autopilot 전환 함수나 UShipNavigator 변경을 추가하지 않는다.
 
 - [ ] **Step 7: DefaultInput.ini 생성**
 
@@ -1507,7 +2004,11 @@ bShouldFlushPressedKeysOnViewportFocusLost=True
 
 - [ ] **Step 8: Pawn GREEN과 전체 회귀**
 
-전체 prefix로 11개 test를 실행한다. Expected: Construction, InputLifecycle, FocusLossAndAutopilotGuard를 포함한 11개 Result Success. Config test는 세 줄을 정확히 읽고 Completed와 Canceled handler가 각 축을 0으로 만들며 DeactivateManualInput 두 번 호출이 안전한지 단언한다.
+~~~powershell
+Invoke-ShipGreenGate -ExpectedTests 11 -Stage "Task4"
+~~~
+
+Expected: build exit 0 뒤 발견 11, Success 11, failure 및 automation error 0, clean exit marker 1개 이상이다. Pawn tests는 실제 Triggered, Completed, Canceled, UnPossessed, EndPlay, mapping 제거 횟수 1, controller pressed-key flush 뒤 drag-only step과 늦은 release 뒤 autopilot 입력 보존을 단언한다. OS focus 전환 자체는 PIE에서 보완 검증한다.
 
 - [ ] **Step 9: Task 4 commit**
 
@@ -1535,7 +2036,7 @@ git commit -m "feat: 선박 수동 입력과 카메라 구성" -m "변경 이유
 
 - [ ] **Step 1: GameMode RED test 추가**
 
-Transient world에 APlayerController와 ASimGameMode를 만들고 BeginPlay 뒤 AShipPawn 한 대가 생성 및 possessed되는지 확인한다. 같은 GameMode bootstrap을 다시 호출해 ship 수가 한 대인지 확인하고, 이미 AShipPawn을 possess한 controller 경로도 중복 spawn하지 않는지 검사한다.
+Task 4의 LocalPlayer fixture가 `SetGameMode`, `InitializeActorsForPlay`, `SpawnPlayActor`, `UWorld::BeginPlay`를 실행하게 한다. ASimGameMode actor의 BeginPlay는 정상 actor lifecycle에서 정확히 한 번만 실행한다. spawn과 possession의 멱등 부분은 private `EnsureTestShipForFirstPlayer()` helper로 추출하고 test는 BeginPlay가 아니라 이 helper만 두 번 더 호출한다. 이로써 `AActor::DispatchBeginPlay` 상태 전제를 위반하지 않고도 반복성을 검증한다.
 
 ~~~cpp
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimGameModeBootstrapTest,
@@ -1544,32 +2045,70 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimGameModeBootstrapTest,
 
 struct FSimGameModeTestAccessor
 {
-    static void BeginPlay(ASimGameMode& GameMode) { GameMode.BeginPlay(); }
+    static void EnsureTestShipForFirstPlayer(ASimGameMode& GameMode)
+    {
+        GameMode.EnsureTestShipForFirstPlayer();
+    }
+    static int32 BeginPlayInvocationCount(const ASimGameMode& GameMode)
+    {
+        return GameMode.TestBeginPlayInvocationCount;
+    }
 };
 
 bool FSimGameModeBootstrapTest::RunTest(const FString&)
 {
-    FScopedShipTestWorld TestWorld;
-    APlayerController* PC = TestWorld.World->SpawnActor<APlayerController>();
-    ASimGameMode* GameMode = TestWorld.World->SpawnActor<ASimGameMode>();
-    FSimGameModeTestAccessor::BeginPlay(*GameMode);
-    TestNotNull(TEXT("ship possessed"), Cast<AShipPawn>(PC->GetPawn()));
+    FScopedShipInputWorld Input;
+    Input.StartPlay();
+    ASimGameMode* GameMode = Cast<ASimGameMode>(Input.World->GetAuthGameMode());
+    TestNotNull(TEXT("project GameMode exists"), GameMode);
+    if (GameMode == nullptr)
+    {
+        return false;
+    }
+    TestTrue(TEXT("GameMode used normal BeginPlay lifecycle"),
+        GameMode->HasActorBegunPlay());
+    TestEqual(TEXT("GameMode BeginPlay ran exactly once"),
+        FSimGameModeTestAccessor::BeginPlayInvocationCount(*GameMode), 1);
+    TestNotNull(TEXT("real LocalPlayer"), Input.Controller->GetLocalPlayer());
+    TestNotNull(TEXT("real Enhanced subsystem"), Input.Subsystem);
+    AShipPawn* PossessedShip = Cast<AShipPawn>(Input.Controller->GetPawn());
+    TestNotNull(TEXT("ship possessed"), PossessedShip);
+    if (PossessedShip != nullptr)
+    {
+        TestNotNull(TEXT("possessed ship has Enhanced input component"),
+            Cast<UEnhancedInputComponent>(PossessedShip->InputComponent));
+        TestTrue(TEXT("manual context registered"), Input.Subsystem->HasMappingContext(
+            &FShipPawnTestAccessor::Mapping(*PossessedShip)));
+    }
     TArray<AActor*> Ships;
     UGameplayStatics::GetAllActorsOfClass(
-        TestWorld.World, AShipPawn::StaticClass(), Ships);
+        Input.World, AShipPawn::StaticClass(), Ships);
     TestEqual(TEXT("one ship"), Ships.Num(), 1);
-    FSimGameModeTestAccessor::BeginPlay(*GameMode);
+    FSimGameModeTestAccessor::EnsureTestShipForFirstPlayer(*GameMode);
+    FSimGameModeTestAccessor::EnsureTestShipForFirstPlayer(*GameMode);
     Ships.Reset();
     UGameplayStatics::GetAllActorsOfClass(
-        TestWorld.World, AShipPawn::StaticClass(), Ships);
-    TestEqual(TEXT("still one ship"), Ships.Num(), 1);
+        Input.World, AShipPawn::StaticClass(), Ships);
+    TestEqual(TEXT("helper remains idempotent"), Ships.Num(), 1);
+    TestTrue(TEXT("same ship remains possessed"),
+        Input.Controller->GetPawn() == PossessedShip);
+    TestEqual(TEXT("helper does not redispatch BeginPlay"),
+        FSimGameModeTestAccessor::BeginPlayInvocationCount(*GameMode), 1);
     return true;
 }
+
+#endif // WITH_DEV_AUTOMATION_TESTS
 ~~~
+
+이 `#endif`가 ShipMovementTests.cpp의 유일한 closing guard다. 파일 첫 줄의 opening guard보다 앞이나 이 줄보다 뒤에 include, macro, fixture 또는 RunTest 구현을 두지 않는다.
 
 - [ ] **Step 2: RED build 확인**
 
-Expected: constructor, ShipPawnClass, TestShipSpawnTransform과 spawn 구현이 없어 test 실패한다.
+~~~powershell
+Invoke-ExpectedRedBuild -Stage "Task5" -ExpectedFailurePattern 'EnsureTestShipForFirstPlayer|ShipPawnClass|TestShipSpawnTransform|FSimGameModeBootstrapTest'
+~~~
+
+Expected: idempotent helper, ShipPawnClass, TestShipSpawnTransform 또는 spawn 구현 부재로 build가 실패하고 editor는 실행하지 않는다.
 
 - [ ] **Step 3: GameMode header와 source 구현**
 
@@ -1590,7 +2129,9 @@ private:
     TSubclassOf<AShipPawn> ShipPawnClass;
     UPROPERTY(EditAnywhere, Category=Stage3Test)
     FTransform TestShipSpawnTransform = FTransform::Identity;
+    void EnsureTestShipForFirstPlayer();
 #if WITH_DEV_AUTOMATION_TESTS
+    int32 TestBeginPlayInvocationCount = 0;
     friend struct FSimGameModeTestAccessor;
 #endif
 };
@@ -1613,6 +2154,14 @@ ASimGameMode::ASimGameMode()
 void ASimGameMode::BeginPlay()
 {
     Super::BeginPlay();
+#if WITH_DEV_AUTOMATION_TESTS
+    ++TestBeginPlayInvocationCount;
+#endif
+    EnsureTestShipForFirstPlayer();
+}
+
+void ASimGameMode::EnsureTestShipForFirstPlayer()
+{
     APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
     if (!IsValid(PC))
     {
@@ -1639,7 +2188,11 @@ void ASimGameMode::BeginPlay()
 
 - [ ] **Step 4: GameMode GREEN과 12개 전체 회귀**
 
-전체 prefix 명령을 실행한다. Expected: Bootstrap 포함 12개 Result Success, build exit 0. ShipNavigator, CourseBuilder, ShipCapture 파일은 diff에 없어야 한다.
+~~~powershell
+Invoke-ShipGreenGate -ExpectedTests 12 -Stage "Task5"
+~~~
+
+Expected: build exit 0 뒤 발견 12, Success 12, failure 및 automation error 0, clean exit marker 1개 이상이다. Bootstrap test는 정상 BeginPlay 한 번, helper 두 번, ship 한 대와 같은 possession을 단언한다. ShipNavigator, CourseBuilder, ShipCapture 파일은 diff에 없어야 한다.
 
 - [ ] **Step 5: Task 5 commit**
 
@@ -1669,10 +2222,16 @@ $ConfigBefore = Get-ChildItem -LiteralPath $ConfigRoot -File -Recurse | Sort-Obj
         Path = $_.FullName.Substring($ConfigRoot.Length + 1).Replace("\","/")
         Hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash
         Length = $_.Length
+        LastWriteTimeUtc = $_.LastWriteTimeUtc.Ticks
     }
 }
 $MapPath = "$RepoRoot/ShipAutonomySim/Content/Maps/MainLevel.umap"
-$MapBefore = Get-FileHash -Algorithm SHA256 -LiteralPath $MapPath
+$MapItemBefore = Get-Item -LiteralPath $MapPath
+$MapBefore = [pscustomobject]@{
+    Hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $MapPath).Hash
+    Length = $MapItemBefore.Length
+    LastWriteTimeUtc = $MapItemBefore.LastWriteTimeUtc.Ticks
+}
 ~~~
 
 - [ ] **Step 2: UE 5.5.4 full editor build**
@@ -1680,32 +2239,104 @@ $MapBefore = Get-FileHash -Algorithm SHA256 -LiteralPath $MapPath
 ~~~powershell
 $EngineRoot = Join-Path $env:ProgramFiles "Epic Games/UE_5.5"
 $Project = "$RepoRoot/ShipAutonomySim/ShipAutonomySim.uproject"
-& "$EngineRoot/Engine/Build/BatchFiles/Build.bat" ShipAutonomySimEditor Win64 Development "-Project=$Project" -WaitMutex
-if ($LASTEXITCODE -ne 0) { throw "No-Go: build failed" }
+$ProjectRoot = [IO.Path]::GetFullPath("$RepoRoot/ShipAutonomySim")
+$OutputRoots = @(
+    [IO.Path]::GetFullPath("$ProjectRoot/Binaries"),
+    [IO.Path]::GetFullPath("$ProjectRoot/Intermediate")
+)
+foreach ($OutputRoot in $OutputRoots) {
+    $ExpectedPrefix = $ProjectRoot.TrimEnd('\','/') + [IO.Path]::DirectorySeparatorChar
+    $Leaf = [IO.Path]::GetFileName($OutputRoot)
+    if (!$OutputRoot.StartsWith($ExpectedPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+        $Leaf -notin @("Binaries", "Intermediate")) {
+        throw "No-Go: UBT output scope escaped the project: $OutputRoot"
+    }
+    $RelativeOutput = $OutputRoot.Substring($RepoRoot.Length + 1).Replace("\", "/")
+    git check-ignore -q -- $RelativeOutput
+    if ($LASTEXITCODE -ne 0) {
+        throw "No-Go: UBT output is not ignored: $RelativeOutput"
+    }
+}
+
+$TrackedBeforeFullBuild = (git status --porcelain=v1 --untracked-files=no | Out-String)
+$CleanLog = "$RepoRoot/ShipAutonomySim/Saved/Logs/ShipMovement-FinalClean.log"
+& "$EngineRoot/Engine/Build/BatchFiles/Build.bat" ShipAutonomySimEditor Win64 Development "-Project=$Project" -WaitMutex -Clean 2>&1 |
+    Tee-Object -FilePath $CleanLog
+$CleanExit = $LASTEXITCODE
+if ($CleanExit -ne 0) { throw "No-Go: project-scoped UBT clean failed with exit $CleanExit" }
+if ($TrackedBeforeFullBuild -cne (git status --porcelain=v1 --untracked-files=no | Out-String)) {
+    throw "No-Go: tracked state changed during UBT clean; do not reset, restore, clean, or delete"
+}
+
+$FullBuildLog = "$RepoRoot/ShipAutonomySim/Saved/Logs/ShipMovement-FinalFullBuild.log"
+& "$EngineRoot/Engine/Build/BatchFiles/Build.bat" ShipAutonomySimEditor Win64 Development "-Project=$Project" -WaitMutex 2>&1 |
+    Tee-Object -FilePath $FullBuildLog
+$FullBuildExit = $LASTEXITCODE
+if ($FullBuildExit -ne 0) { throw "No-Go: full editor build failed with exit $FullBuildExit" }
+$FullBuildText = Get-Content -LiteralPath $FullBuildLog -Raw
+$CompileActions = [regex]::Matches($FullBuildText, '(?m)^\s*\[\d+/\d+\]\s+Compile\b').Count
+$LinkActions = [regex]::Matches($FullBuildText, '(?m)^\s*\[\d+/\d+\]\s+Link\b').Count
+$UpToDateMarkers = [regex]::Matches($FullBuildText, 'Target is up to date').Count
+if ($CompileActions -lt 1 -or $LinkActions -lt 1 -or $UpToDateMarkers -ne 0) {
+    throw "No-Go: full compile proof missing compile=$CompileActions link=$LinkActions upToDate=$UpToDateMarkers"
+}
+if ($TrackedBeforeFullBuild -cne (git status --porcelain=v1 --untracked-files=no | Out-String)) {
+    throw "No-Go: tracked state changed during full build; do not repair it"
+}
+[pscustomobject]@{
+    CleanExit = $CleanExit
+    FullBuildExit = $FullBuildExit
+    CompileActions = $CompileActions
+    LinkActions = $LinkActions
+}
 ~~~
 
-Expected: exit 0. 사용 가능한 MSVC가 UE 선호 버전과 다르다는 warning은 build 성공과 분리해 기록한다.
+Expected: 명시한 project의 ignored `Binaries`와 `Intermediate`만 UBT `-Clean` 대상임을 먼저 증명한다. clean exit 0 뒤 full build exit 0, compile action 1개 이상, link action 1개 이상, `Target is up to date` 0개를 기록한다. 광범위한 filesystem 삭제 명령은 사용하지 않는다. 사용 가능한 MSVC가 UE 선호 버전과 다르다는 warning은 build 성공과 분리해 기록한다.
 
 - [ ] **Step 3: 전체 Automation Test 12개**
 
 ~~~powershell
+if ($FullBuildExit -ne 0 -or $CompileActions -lt 1 -or $LinkActions -lt 1) {
+    throw "No-Go: verified full build did not complete; stale editor binary must not run"
+}
 $AutomationLog = "$RepoRoot/ShipAutonomySim/Saved/Logs/ShipMovement-FinalAutomation.log"
 & "$EngineRoot/Engine/Binaries/Win64/UnrealEditor-Cmd.exe" $Project -Unattended -NoSplash -NoSound -NullRHI -NoP4 -NoAssetRegistryCache -nowrite -NoAnalytics -NoEpicPortal -stdout -FullStdOutLogOutput "-abslog=$AutomationLog" '-ExecCmds=Automation RunTests ShipAutonomySim.ShipMovement;Automation Quit'
 if ($LASTEXITCODE -ne 0) { throw "No-Go: automation process failed" }
-rg -n "Found 12 automation tests|Test Completed.*Result=\{Success\}" $AutomationLog
-rg -n "Result=\{Fail|Result=\{Failed|Automation.*Error|Fatal error" $AutomationLog
+$AutomationText = Get-Content -LiteralPath $AutomationLog -Raw
+$FoundMatches = [regex]::Matches($AutomationText, 'Found\s+(\d+)\s+automation tests')
+$FoundTests = if ($FoundMatches.Count -eq 0) { -1 } else { [int]$FoundMatches[$FoundMatches.Count - 1].Groups[1].Value }
+$SuccessTests = [regex]::Matches($AutomationText, 'Test Completed.*Result=\{Success\}').Count
+$FailedTests = [regex]::Matches($AutomationText, 'Test Completed.*Result=\{(?:Fail|Failed|Error|NotRun)\}').Count
+$AutomationErrors = [regex]::Matches($AutomationText, '(?m)^(?:.*(?:LogAutomationController|LogAutomationCommandLine):\s+Error:|.*Fatal error:)').Count
+$AutomationCleanExit = [regex]::Matches($AutomationText, 'LogExit: (?:Exiting\.|Editor shut down)').Count
+if ($FoundTests -ne 12 -or $SuccessTests -ne 12 -or $FailedTests -ne 0 -or
+    $AutomationErrors -ne 0 -or $AutomationCleanExit -lt 1) {
+    throw "No-Go: automation found=$FoundTests success=$SuccessTests failed=$FailedTests errors=$AutomationErrors cleanExit=$AutomationCleanExit"
+}
 ~~~
 
-Expected: 12개를 찾고 12개 Result Success, 실패 regex 0건. 명령 exit 0만으로 통과 처리하지 않는다.
+Expected: full build 증거가 먼저 있어야 editor를 시작한다. 발견 12, 정확한 Success 12, failed/error 0, clean exit marker 1개 이상이어야 한다. 명령 exit 0만으로 통과 처리하지 않는다.
 
 - [ ] **Step 4: no-write MainLevel 명령줄 검증**
 
 ~~~powershell
+if ($FullBuildExit -ne 0 -or $CompileActions -lt 1 -or $LinkActions -lt 1) {
+    throw "No-Go: verified full build did not complete; MainLevel was not opened"
+}
 $MapLog = "$RepoRoot/ShipAutonomySim/Saved/Logs/ShipMovement-MainLevel-nowrite.log"
 & "$EngineRoot/Engine/Binaries/Win64/UnrealEditor-Cmd.exe" $Project /Game/Maps/MainLevel -Unattended -NoSplash -NoSound -NullRHI -NoP4 -NoAssetRegistryCache -nowrite -NoAnalytics -NoEpicPortal -stdout -FullStdOutLogOutput "-abslog=$MapLog" "-ExecCmds=QUIT_EDITOR"
 if ($LASTEXITCODE -ne 0) { throw "No-Go: MainLevel validation process failed" }
-rg -n "Map check complete: 0 Error\(s\), 0 Warning\(s\)|LogExit: Editor shut down|LogExit: Exiting" $MapLog
-rg -n "LoadErrors|Fatal error|\bError:" $MapLog
+$MapText = Get-Content -LiteralPath $MapLog -Raw
+$AllMapChecks = [regex]::Matches($MapText, 'Map check complete:[^\r\n]*').Count
+$PassingMapChecks = [regex]::Matches($MapText, 'Map check complete: 0 Error\(s\), 0 Warning\(s\)').Count
+$LoadErrors = [regex]::Matches($MapText, '(?im)^.*LoadErrors.*(?:Error|Warning)').Count
+$FatalErrors = [regex]::Matches($MapText, '(?im)Fatal error:').Count
+$SeverityErrors = [regex]::Matches($MapText, '(?m)^.*:\s+Error:').Count
+$MapCleanExit = [regex]::Matches($MapText, 'LogExit: (?:Exiting\.|Editor shut down)').Count
+if ($AllMapChecks -ne 1 -or $PassingMapChecks -ne 1 -or $LoadErrors -ne 0 -or
+    $FatalErrors -ne 0 -or $SeverityErrors -ne 0 -or $MapCleanExit -lt 1) {
+    throw "No-Go: mapChecks=$AllMapChecks passing=$PassingMapChecks loadErrors=$LoadErrors fatal=$FatalErrors errors=$SeverityErrors cleanExit=$MapCleanExit"
+}
 ~~~
 
 Expected: exit 0, MapCheck 0 Error와 0 Warning, LoadErrors 및 Fatal과 severity Error 0, clean LogExit. QUIT이나 저장 가능한 editor 실행으로 대체하지 않는다.
@@ -1718,16 +2349,26 @@ $ConfigAfter = Get-ChildItem -LiteralPath $ConfigRoot -File -Recurse | Sort-Obje
         Path = $_.FullName.Substring($ConfigRoot.Length + 1).Replace("\","/")
         Hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash
         Length = $_.Length
+        LastWriteTimeUtc = $_.LastWriteTimeUtc.Ticks
     }
 }
-$MapAfter = Get-FileHash -Algorithm SHA256 -LiteralPath $MapPath
+$MapItemAfter = Get-Item -LiteralPath $MapPath
+$MapAfter = [pscustomobject]@{
+    Hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $MapPath).Hash
+    Length = $MapItemAfter.Length
+    LastWriteTimeUtc = $MapItemAfter.LastWriteTimeUtc.Ticks
+}
 $StatusAfter = @(git status --porcelain=v1 --untracked-files=all)
 $ConfigDiff = @(Compare-Object ($ConfigBefore | ConvertTo-Json -Compress) ($ConfigAfter | ConvertTo-Json -Compress))
-if ($ConfigDiff.Count -ne 0 -or $MapBefore.Hash -ne $MapAfter.Hash -or $StatusAfter.Count -ne 0) {
+if ($ConfigDiff.Count -ne 0 -or $MapBefore.Hash -ne $MapAfter.Hash -or
+    $MapBefore.Length -ne $MapAfter.Length -or
+    $MapBefore.LastWriteTimeUtc -ne $MapAfter.LastWriteTimeUtc -or
+    $StatusAfter.Count -ne 0) {
     throw "No-Go: unexpected tracked, config, or map change; do not reset, restore, clean, or delete"
 }
 if ((git rev-parse HEAD) -ne $HeadBefore) { throw "No-Go: HEAD changed during verification" }
 git diff --check
+if ($LASTEXITCODE -ne 0) { throw "No-Go: git diff --check failed" }
 ~~~
 
 - [ ] **Step 6: PIE 사람 검증**
@@ -1752,14 +2393,46 @@ PIE를 시작하고 Output Log와 화면 debug를 보면서 다음 항목을 순
 - [ ] Ocean query 실패 시 Excluded, QueryInvalid 또는 ComponentInvalid가 표시되고 transform은 유한하다.
 - [ ] frame hitch에도 한 tick substep 8 이하, dropped DeltaTime 표시, 다음 tick catch-up 급가속 없음이 확인된다.
 - [ ] 기존 blocking geometry가 있으면 관통 없이 speed 0이며 후진으로 빠져나온다. 없으면 자동화 transient world 결과를 사용하고 벽을 추가하지 않는다.
-- [ ] 화면에 입력, speed, acceleration, yaw rate, substep, water, hit와 parameter 상태가 갱신된다.
+- [ ] 화면에 입력, speed, acceleration, yaw rate, substep, water, hit와 parameter 상태가 정상 frame과 Water fallback/error frame 모두 frame당 정확히 한 번 갱신된다.
 - [ ] Output Log에 매 프레임 warning, ensure, access violation이 없다.
 
 - [ ] **Step 7: 최종 범위와 이력 확인**
 
 ~~~powershell
-git diff 76461c18681998d8d8e954b1e0fddf79d874ffeb..HEAD --name-only
+$AllowedFiles = @(
+    "docs/superpowers/specs/2026-08-08-ship-movement-model-design.md",
+    "docs/superpowers/plans/2026-08-08-ship-movement-model.md",
+    "ShipAutonomySim/Config/DefaultInput.ini",
+    "ShipAutonomySim/Source/ShipAutonomySim/Private/ShipMovementSimulation.h",
+    "ShipAutonomySim/Source/ShipAutonomySim/Private/ShipMovementSimulation.cpp",
+    "ShipAutonomySim/Source/ShipAutonomySim/Private/ShipMovement.cpp",
+    "ShipAutonomySim/Source/ShipAutonomySim/Private/ShipPawn.cpp",
+    "ShipAutonomySim/Source/ShipAutonomySim/Private/SimGameMode.cpp",
+    "ShipAutonomySim/Source/ShipAutonomySim/Private/Tests/ShipMovementTests.cpp",
+    "ShipAutonomySim/Source/ShipAutonomySim/Public/ShipMovement.h",
+    "ShipAutonomySim/Source/ShipAutonomySim/Public/ShipPawn.h",
+    "ShipAutonomySim/Source/ShipAutonomySim/Public/SimGameMode.h"
+)
+$ChangedFiles = @(git diff 76461c18681998d8d8e954b1e0fddf79d874ffeb..HEAD --name-only)
+$UnexpectedFiles = @($ChangedFiles | Where-Object { $_ -notin $AllowedFiles })
+if ($UnexpectedFiles.Count -ne 0) {
+    throw "No-Go: out-of-scope files: $($UnexpectedFiles -join ', ')"
+}
+
+$TestSourcePath = "$RepoRoot/ShipAutonomySim/Source/ShipAutonomySim/Private/Tests/ShipMovementTests.cpp"
+$TestSource = Get-Content -LiteralPath $TestSourcePath -Raw
+$GuardOpenCount = [regex]::Matches($TestSource, '(?m)^#if WITH_DEV_AUTOMATION_TESTS\s*$').Count
+$GuardCloseCount = [regex]::Matches($TestSource, '(?m)^#endif // WITH_DEV_AUTOMATION_TESTS\s*$').Count
+$MacroCount = [regex]::Matches($TestSource, '(?m)^IMPLEMENT_SIMPLE_AUTOMATION_TEST\(').Count
+if (!$TestSource.TrimStart().StartsWith("#if WITH_DEV_AUTOMATION_TESTS") -or
+    !$TestSource.TrimEnd().EndsWith("#endif // WITH_DEV_AUTOMATION_TESTS") -or
+    $GuardOpenCount -ne 1 -or $GuardCloseCount -ne 1 -or $MacroCount -ne 12) {
+    throw "No-Go: test translation unit guard or macro count mismatch open=$GuardOpenCount close=$GuardCloseCount tests=$MacroCount"
+}
+
 git log --format="%h %s%n%b" 76461c18681998d8d8e954b1e0fddf79d874ffeb..HEAD
+$FinalStatus = @(git status --porcelain=v1 --untracked-files=all)
+if ($FinalStatus.Count -ne 0) { throw "No-Go: final worktree is not clean" }
 git status --short --branch
 ~~~
 
@@ -1769,7 +2442,16 @@ Expected: 제품 변경은 File Structure의 생성 및 수정 목록만 포함�
 
 - [x] 설계의 목표, 수식, 안전 경계, Water 다섯 상태, input lifecycle, PIE 및 FPS 합격표를 Task와 검증에 대응시킴
 - [x] Task 간 interface 이름과 타입을 Public and Private Interfaces에 고정함
+- [x] 5개 Task와 고유 Automation Test 12개를 유지하고 test translation unit 전체를 하나의 WITH_DEV_AUTOMATION_TESTS guard로 감쌈
+- [x] GameMode BeginPlay는 정상 world lifecycle에서 한 번만 실행하고 idempotent helper만 반복 호출하도록 분리함
+- [x] LocalPlayer, 실제 Enhanced subsystem과 component, InputKey, PlayerTick, FlushPressedKeys, UnPossessed와 EndPlay 경로를 test code로 고정함
+- [x] Completed와 Canceled release handler 모두 manual-active guard를 거치며 늦은 event 뒤 autopilot setter 값 보존을 단언함
+- [x] runtime source 전체 transform mutator denylist와 swept actor move 및 고정 child setup의 exact whitelist를 고정함
+- [x] 정상, Water fallback과 오류 tick 모두 scope-exit에서 debug를 frame당 정확히 한 번 호출함
+- [x] 모든 GREEN gate가 build exit 뒤 발견 수, Success 수, failure/error 0과 clean exit를 강제함
+- [x] final build는 project 내부 ignored UBT 산출물만 -Clean한 뒤 compile 및 link action을 강제함
 - [x] 제품 변경 경로와 변경 금지 경로를 분리함
 - [x] 4단계 Navigator, 코스와 벽 및 5단계 Capture가 구현 Task에 없음을 확인함
 - [x] 외부 의존성, 에셋, 새 모듈이 없음을 확인함
 - [x] 예상 밖 tracked change를 복구하지 않는 No-Go와 no-write MainLevel 명령을 포함함
+- [x] 미정 표현, 타입 및 시그니처, 파일 경로, code fence, Task 선후관계와 3단계 범위를 다시 검사함
