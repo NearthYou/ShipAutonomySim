@@ -56,7 +56,7 @@
 - WaterBodyTypes.h: ComputeLocation, ComputeNormal, IncludeWaves, GetQueryFlags, GetWaterSurfaceLocation, GetWaterSurfaceNormal, IsInExclusionVolume
 - Enhanced Input: UInputMappingContext::MapKey(const UInputAction*, FKey), FEnhancedActionKeyMapping::Modifiers, AddMappingContext, RemoveMappingContext, Triggered, Completed, Canceled
 - GameInstance.h와 LocalPlayer.h: UGameInstance::InitializeStandalone, AddLocalPlayer, RemoveLocalPlayer, ULocalPlayer::SpawnPlayActor, ULocalPlayer::GetSubsystem
-- EnhancedInputSubsystems.h와 EnhancedInputSubsystemInterface.h: UEnhancedInputLocalPlayerSubsystem, HasMappingContext, FModifyContextOptions::bForceImmediately, RequestRebuildControlMappings
+- EnhancedInputSubsystems.h와 EnhancedInputSubsystemInterface.h: `FModifyContextOptions()`는 `bForceImmediately=false`이며 `virtual void RequestRebuildControlMappings(const FModifyContextOptions& Options = FModifyContextOptions(), EInputMappingRebuildType RebuildType = EInputMappingRebuildType::Rebuild)`. 같은 frame의 입력 전에 mapping이 필요하면 `Options.bForceImmediately = true`로 호출한다.
 - PlayerController.h와 PlayerInput.h: APlayerController::InputKey(const FInputKeyParams&), PlayerTick, FlushPressedKeys와 FInputKeyParams(FKey, EInputEvent, double, bool, FInputDeviceId)
 - World.h와 Actor.h: UWorld::SetGameMode(const FURL&), InitializeActorsForPlay(const FURL&), BeginPlay(), AActor::HasActorBegunPlay(). GameMode BeginPlay test는 이 정상 world lifecycle을 사용한다.
 - Actor.h: bool SetActorLocationAndRotation(FVector, const FQuat&, bool, FHitResult*, ETeleportType). bSweep가 true일 때 root component만 sweep한다.
@@ -65,16 +65,39 @@
 
 ## 공통 TDD 검증 게이트
 
-각 Task의 RED 단계는 제품 구현 전에 아래 함수를 현재 PowerShell 세션에 정의한 뒤 해당 Task가 지정한 실패 패턴으로 호출한다. build가 성공하면 RED 실패로 처리하고 editor는 실행하지 않는다. 각 GREEN 단계는 같은 세션에 `Invoke-ShipGreenGate`를 정의한 뒤 기대 test 수 4, 6, 8, 11, 12를 넘긴다. 이 함수는 build exit 0을 확인하기 전에는 editor를 시작하지 않으며, 발견 수, Success 수, failure/error 수와 clean exit marker를 계산해 하나라도 계약과 다르면 throw한다. 새 tracked 검증 script는 만들지 않는다.
+각 Task의 RED 단계는 제품 구현 전에 아래 함수를 현재 PowerShell 세션에 정의한 뒤 해당 Task의 누적 test 수 4, 6, 8, 11, 12와 실패 패턴으로 호출한다. 먼저 test cpp가 유일한 opening 및 closing guard와 해당 시점의 정확한 macro 수를 갖는지 강제하므로 Task 1부터 독립적으로 전처리할 수 있다. build가 성공하면 RED 실패로 처리하고 editor는 실행하지 않는다. 각 GREEN 단계도 같은 guard 검사를 통과한 뒤 build와 automation을 실행한다. build exit 0을 확인하기 전에는 editor를 시작하지 않으며, 발견 수, Success 수, failure/error 수와 clean exit marker를 계산해 하나라도 계약과 다르면 throw한다. 새 tracked 검증 script는 만들지 않는다.
 
 ~~~powershell
+function Assert-ShipTestTranslationUnitGuard {
+    param(
+        [Parameter(Mandatory=$true)][string]$RepoRoot,
+        [Parameter(Mandatory=$true)][ValidateSet(4,6,8,11,12)][int]$ExpectedTests
+    )
+    $TestSourcePath = Join-Path $RepoRoot "ShipAutonomySim/Source/ShipAutonomySim/Private/Tests/ShipMovementTests.cpp"
+    $TestSource = Get-Content -LiteralPath $TestSourcePath -Raw
+    $GuardOpenCount = [regex]::Matches(
+        $TestSource, '(?m)^#if WITH_DEV_AUTOMATION_TESTS\s*$').Count
+    $GuardCloseCount = [regex]::Matches(
+        $TestSource, '(?m)^#endif // WITH_DEV_AUTOMATION_TESTS\s*$').Count
+    $MacroCount = [regex]::Matches(
+        $TestSource, '(?m)^IMPLEMENT_SIMPLE_AUTOMATION_TEST\(').Count
+    if (!$TestSource.TrimStart().StartsWith("#if WITH_DEV_AUTOMATION_TESTS") -or
+        !$TestSource.TrimEnd().EndsWith("#endif // WITH_DEV_AUTOMATION_TESTS") -or
+        $GuardOpenCount -ne 1 -or $GuardCloseCount -ne 1 -or
+        $MacroCount -ne $ExpectedTests) {
+        throw "No-Go: test guard mismatch open=$GuardOpenCount close=$GuardCloseCount tests=$MacroCount expected=$ExpectedTests"
+    }
+}
+
 function Invoke-ExpectedRedBuild {
     param(
         [Parameter(Mandatory=$true)][string]$Stage,
+        [Parameter(Mandatory=$true)][ValidateSet(4,6,8,11,12)][int]$ExpectedTests,
         [Parameter(Mandatory=$true)][string]$ExpectedFailurePattern
     )
     $RepoRoot = (git rev-parse --show-toplevel).Trim()
     if ($LASTEXITCODE -ne 0) { throw "No-Go: repository root unavailable" }
+    Assert-ShipTestTranslationUnitGuard -RepoRoot $RepoRoot -ExpectedTests $ExpectedTests
     $EngineRoot = Join-Path $env:ProgramFiles "Epic Games/UE_5.5"
     $Project = Join-Path $RepoRoot "ShipAutonomySim/ShipAutonomySim.uproject"
     $BuildLog = Join-Path $RepoRoot "ShipAutonomySim/Saved/Logs/ShipMovement-$Stage-RED-build.log"
@@ -95,6 +118,7 @@ function Invoke-ShipGreenGate {
     )
     $RepoRoot = (git rev-parse --show-toplevel).Trim()
     if ($LASTEXITCODE -ne 0) { throw "No-Go: repository root unavailable" }
+    Assert-ShipTestTranslationUnitGuard -RepoRoot $RepoRoot -ExpectedTests $ExpectedTests
     $EngineRoot = Join-Path $env:ProgramFiles "Epic Games/UE_5.5"
     $Project = Join-Path $RepoRoot "ShipAutonomySim/ShipAutonomySim.uproject"
     $BuildLog = Join-Path $RepoRoot "ShipAutonomySim/Saved/Logs/ShipMovement-$Stage-build.log"
@@ -188,7 +212,7 @@ FShipSurfaceBasis BuildShipSurfaceBasis(
 | UShipMovement만 swept transform 변경, blocking hit speed 0 | Task 3 | Runtime.FallbackAndBlockingHit, 전체 runtime mutator denylist와 exact whitelist |
 | 200 x 100 x 100 hull, 물리 비활성화, 3인칭 카메라 | Task 4 | Pawn.Construction, PIE |
 | runtime Enhanced Input WASD, UObject 수명, 양쪽 키 상쇄 | Task 4 | Pawn.InputLifecycle, PIE |
-| Completed, Canceled, focus loss, UnPossessed, EndPlay reset | Task 4 | 실제 controller event와 lifecycle, FlushPressedKeys automation, OS focus PIE |
+| Completed, Canceled, focus loss, UnPossessed, EndPlay reset | Task 4 | 즉시 mapping rebuild, W/A 비영 입력 선행 단언, FlushPressedKeys automation, OS focus PIE |
 | 향후 autopilot 활성 중 수동 입력 무시, 같은 두 setter 사용 | Task 4 | queued Completed와 Canceled 뒤 setter 값 보존 |
 | GameMode test spawn, 중복 방지와 possession | Task 5 | 정상 BeginPlay 한 번과 idempotent helper 두 번, PIE |
 | 15, 30, 60, 120 FPS 합격표와 hitch | Task 1, Final Verification | 자동화 표와 PIE 기록 |
@@ -232,11 +256,12 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FShipMotionParameterValidationTest,
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FShipMotionFrameRatesAndHitchTest,
     "ShipAutonomySim.ShipMovement.Motion.FrameRatesAndHitch",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+#endif // WITH_DEV_AUTOMATION_TESTS
 ~~~
 
-이 `#if WITH_DEV_AUTOMATION_TESTS`는 여기서 닫지 않는다. Task 2부터 Task 5까지 추가되는 include, 12개 macro 선언, fixture, accessor와 모든 RunTest 본문을 같은 guard 안에 두고, 마지막 GameMode.Bootstrap RunTest 뒤에서 단 한 번 `#endif`로 닫는다.
+Task 1이 파일을 처음 만들 때부터 이 closing `#endif`를 마지막 줄에 둔다. 아래 RunTest 본문을 추가할 때는 마지막 `#endif`를 잠시 아래로 옮겨 본문을 guard 안에 삽입하고 즉시 파일 마지막 줄에 다시 둔다. Step 2 RED build와 Task 1 GREEN 및 commit 시점 모두 opening 1개, closing 1개, macro 4개로 균형이 맞아야 한다.
 
-RunTest 본문은 다음 수치를 직접 단언한다.
+RunTest 본문은 기존 closing `#endif` 바로 앞에 삽입하고 다음 수치를 직접 단언한다.
 
 ~~~cpp
 const FShipMotionParameters P = FShipMotionParameters::Defaults();
@@ -261,7 +286,7 @@ TestTrue(TEXT("full-speed yaw rate"),
 - [ ] **Step 2: RED build 확인**
 
 ~~~powershell
-Invoke-ExpectedRedBuild -Stage "Task1" -ExpectedFailurePattern 'ShipMovementSimulation\.h|FShipMotionParameters|AdvanceShipMotion'
+Invoke-ExpectedRedBuild -Stage "Task1" -ExpectedTests 4 -ExpectedFailurePattern 'ShipMovementSimulation\.h|FShipMotionParameters|AdvanceShipMotion'
 ~~~
 
 Expected: ShipMovementSimulation.h가 아직 없어 compile 실패한다. 기존 ShipMovement 골격의 오류가 아니라 새 RED test가 요구한 seam 부재가 실패 원인이다.
@@ -572,7 +597,7 @@ FPS test는 다음 표를 코드의 data row로 사용한다.
 Invoke-ShipGreenGate -ExpectedTests 4 -Stage "Task1"
 ~~~
 
-Expected: build exit 0 뒤 발견 4, Success 4, failure 및 automation error 0, clean exit marker 1개 이상이다.
+Expected: guard opening 및 closing 각 1개와 macro 4개를 먼저 확인하고, build exit 0 뒤 발견 4, Success 4, failure 및 automation error 0, clean exit marker 1개 이상이다.
 
 - [ ] **Step 8: Task 1 commit**
 
@@ -600,6 +625,8 @@ git commit -m "feat: 선박 수치 이동 모델 구현" -m "변경 이유: 프�
 
 - [ ] **Step 1: 두 Water RED test 추가**
 
+ShipMovementTests.cpp의 마지막 closing `#endif` 바로 앞에 두 macro와 두 RunTest 본문을 삽입한 뒤 closing을 다시 파일 마지막 줄에 둔다. 아래 block은 Task 2 완료 시점의 파일 tail이며, opening 1개, closing 1개, macro 6개를 유지한다.
+
 ~~~cpp
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FShipWaterClassificationTest,
     "ShipAutonomySim.ShipMovement.Water.Classification",
@@ -607,14 +634,15 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FShipWaterClassificationTest,
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FShipSurfaceBasisTest,
     "ShipAutonomySim.ShipMovement.Water.SurfaceBasis",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+#endif // WITH_DEV_AUTOMATION_TESTS
 ~~~
 
-Classification은 ComputeLocation | ComputeNormal | IncludeWaves 결과를 만들고 HasWaves true면 ValidWaves, false면 ValidNoWaves를 단언한다. IsInExclusionVolume은 Excluded, flag 누락과 NaN 및 N.Z 0.1 미만은 QueryInvalid, subsystem 또는 component false는 ComponentInvalid를 단언한다. 유효 sample 뒤 실패는 마지막 Z와 normal, 첫 실패는 현재 actor Z와 world up을 사용해야 한다.
+두 RunTest 정의는 closing `#endif` 바로 앞에 넣고 다음 단언을 담는다. Classification은 ComputeLocation | ComputeNormal | IncludeWaves 결과를 만들고 HasWaves true면 ValidWaves, false면 ValidNoWaves를 단언한다. IsInExclusionVolume은 Excluded, flag 누락과 NaN 및 N.Z 0.1 미만은 QueryInvalid, subsystem 또는 component false는 ComponentInvalid를 단언한다. 유효 sample 뒤 실패는 마지막 Z와 normal, 첫 실패는 현재 actor Z와 world up을 사용해야 한다. 두 본문을 추가하거나 고칠 때도 closing `#endif`는 항상 파일 마지막에 되돌린 뒤 RED 또는 GREEN build를 실행한다.
 
 - [ ] **Step 2: RED build 확인**
 
 ~~~powershell
-Invoke-ExpectedRedBuild -Stage "Task2" -ExpectedFailurePattern 'ResolveWaterSurfaceSample|BuildShipSurfaceBasis|unresolved external symbol'
+Invoke-ExpectedRedBuild -Stage "Task2" -ExpectedTests 6 -ExpectedFailurePattern 'ResolveWaterSurfaceSample|BuildShipSurfaceBasis|unresolved external symbol'
 ~~~
 
 Expected: 두 함수가 선언만 있고 정의되지 않은 link 실패를 확인하며 editor는 실행하지 않는다.
@@ -727,7 +755,7 @@ H (1,0,0)과 normalize(1,1,1), yaw 45와 normalize(0,1,1)에서 atan2 결과 yaw
 Invoke-ShipGreenGate -ExpectedTests 6 -Stage "Task2"
 ~~~
 
-Expected: build exit 0 뒤 발견 6, Success 6, failure 및 automation error 0, clean exit marker 1개 이상이다.
+Expected: guard opening 및 closing 각 1개와 macro 6개를 먼저 확인하고, build exit 0 뒤 발견 6, Success 6, failure 및 automation error 0, clean exit marker 1개 이상이다.
 
 - [ ] **Step 7: Task 2 commit**
 
@@ -754,6 +782,8 @@ git commit -m "feat: 선박 수면 정렬 계산 구현" -m "변경 이유: Wate
 - Produces tests: ShipAutonomySim.ShipMovement.Runtime.FallbackAndBlockingHit, Runtime.TransformOwnership
 
 - [ ] **Step 1: runtime RED test 두 개 추가**
+
+Task 2 파일의 마지막 closing `#endif`를 아래 두 macro, include, fixture, accessor와 두 RunTest 본문 뒤로 옮긴다. 아래 여러 C++ block은 모두 같은 outer guard 내부에 이어 붙이는 조각이며, Step 2 전에 closing을 파일 마지막 줄에 복원한다.
 
 FallbackAndBlockingHit는 physics scene을 만든 transient UWorld에 box-root AActor와 UShipMovement를 등록한다. Water가 없는 상태에서 Z를 유지하며 X가 증가하는지 확인하고, WorldStatic box 앞에서 sweep 후 penetration 없이 speed 0과 남은 substep 중단을 확인한다.
 
@@ -981,10 +1011,16 @@ TestEqual(TEXT("invalid tick draws debug exactly once"),
     FShipMovementTestAccessor::DebugDrawCalls(*Movement), BeforeInvalid + 1);
 ~~~
 
+두 Runtime RunTest 본문 뒤 파일 tail은 반드시 다음 한 줄로 끝난다. 이 상태에서 opening 1개, closing 1개, macro 8개다.
+
+~~~cpp
+#endif // WITH_DEV_AUTOMATION_TESTS
+~~~
+
 - [ ] **Step 2: RED build 확인**
 
 ~~~powershell
-Invoke-ExpectedRedBuild -Stage "Task3" -ExpectedFailurePattern 'UShipMovement|SetThrottle|SetSteer|TickComponent|SetActorLocationAndRotation'
+Invoke-ExpectedRedBuild -Stage "Task3" -ExpectedTests 8 -ExpectedFailurePattern 'UShipMovement|SetThrottle|SetSteer|TickComponent|SetActorLocationAndRotation'
 ~~~
 
 Expected: UShipMovement의 새 setter, TickComponent 또는 승인된 swept call 부재로 compile 또는 test 계약이 실패하고 editor는 실행하지 않는다.
@@ -1378,7 +1414,7 @@ void UShipMovement::DrawMovementDebug() const
 Invoke-ShipGreenGate -ExpectedTests 8 -Stage "Task3"
 ~~~
 
-Expected: build exit 0 뒤 발견 8, Success 8, failure 및 automation error 0, clean exit marker 1개 이상이다. Runtime test는 fallback, invalid 입력과 blocking hit tick에서 debug call 증가가 각각 정확히 1이고, sweep 위치 유지, speed 0과 remaining substep 중단을 단언한다.
+Expected: guard opening 및 closing 각 1개와 macro 8개를 먼저 확인하고, build exit 0 뒤 발견 8, Success 8, failure 및 automation error 0, clean exit marker 1개 이상이다. Runtime test는 fallback, invalid 입력과 blocking hit tick에서 debug call 증가가 각각 정확히 1이고, sweep 위치 유지, speed 0과 remaining substep 중단을 단언한다.
 
 - [ ] **Step 8: Task 3 commit**
 
@@ -1407,7 +1443,7 @@ git commit -m "feat: 선박 이동 컴포넌트 완성" -m "변경 이유: 수�
 
 - [ ] **Step 1: 실제 LocalPlayer 입력 fixture와 Pawn RED test 세 개 추가**
 
-Construction은 root extent 100,50,50, visual scale 2,1,1, collision과 physics off, movement, spring arm과 camera 존재를 단언한다. 나머지 두 test는 private handler를 직접 호출하지 않는다. UE 5.5.4의 정상 경로대로 GameInstance에 LocalPlayer를 등록하고, project GameMode로 world actor를 초기화하고, `ULocalPlayer::SpawnPlayActor`가 만든 local APlayerController와 실제 `UEnhancedInputLocalPlayerSubsystem`, `UEnhancedPlayerInput`, `UEnhancedInputComponent`를 사용한다. 키 입력은 `APlayerController::InputKey(FInputKeyParams(...))` 뒤 `PlayerTick`으로 처리한다.
+Task 3 파일의 마지막 closing `#endif`를 세 Pawn macro, include, fixture, accessor와 세 RunTest 본문 뒤로 옮긴다. 아래 C++ block들은 같은 outer guard 안에 이어 붙이고 Step 2 전에 closing을 파일 마지막 줄에 복원한다. Construction은 root extent 100,50,50, visual scale 2,1,1, collision과 physics off, movement, spring arm과 camera 존재를 단언한다. 나머지 두 test는 private handler를 직접 호출하지 않는다. UE 5.5.4의 정상 경로대로 GameInstance에 LocalPlayer를 등록하고, project GameMode로 world actor를 초기화하고, `ULocalPlayer::SpawnPlayActor`가 만든 local APlayerController와 실제 `UEnhancedInputLocalPlayerSubsystem`, `UEnhancedPlayerInput`, `UEnhancedInputComponent`를 사용한다. 키 입력은 `APlayerController::InputKey(FInputKeyParams(...))` 뒤 `PlayerTick`으로 처리한다.
 
 ~~~cpp
 #include "Engine/Engine.h"
@@ -1493,9 +1529,13 @@ public:
             Ship = World->SpawnActor<AShipPawn>();
             Controller->Possess(Ship);
         }
-        TickInput();
         check(Ship != nullptr && Ship->HasActorBegunPlay());
         check(Cast<UEnhancedInputComponent>(Ship->InputComponent) != nullptr);
+        FModifyContextOptions RebuildOptions;
+        RebuildOptions.bForceImmediately = true;
+        Subsystem->RequestRebuildControlMappings(
+            RebuildOptions, EInputMappingRebuildType::Rebuild);
+        TickInput();
         return *Ship;
     }
 
@@ -1561,6 +1601,8 @@ struct FShipPawnTestAccessor
 };
 ~~~
 
+`SetupPlayerInputComponent`의 `AddMappingContext`는 기본 option으로 pending rebuild를 만들 수 있으므로 fixture는 `PlayerTick`이 이를 처리한다고 가정하지 않는다. `PossessShip()`은 첫 `InputKey`보다 먼저 `RequestRebuildControlMappings(RebuildOptions, EInputMappingRebuildType::Rebuild)`를 호출하고 `bForceImmediately=true`로 같은 frame에 live mapping을 만든다.
+
 InputLifecycle은 실제 Completed, Canceled, UnPossessed, EndPlay와 mapping 제거를 다음처럼 실행한다. 첫 fixture의 W release는 Triggered 뒤 Completed를 발생시키고 `UnPossess`가 reset과 한 번의 context 제거를 수행한다. 두 번째 fixture는 test-only로 steer action을 긴 Hold 상태로 재구성해 Ongoing에서 release하도록 하며 실제 Canceled binding을 통과시킨다. 세 번째 fixture의 `Destroy()`는 AActor의 정상 EndPlay 경로를 실행한다.
 
 ~~~cpp
@@ -1617,7 +1659,7 @@ bool FShipPawnInputLifecycleTest::RunTest(const FString&)
 }
 ~~~
 
-FocusLossAndAutopilotGuard는 headless automation이 OS window focus를 만들었다고 가장하지 않는다. 먼저 ini가 viewport focus loss에서 `APlayerController::FlushPressedKeys()`로 이어지는 engine policy를 켰는지 확인한다. 그런 다음 같은 controller의 검증된 `FlushPressedKeys()` 경로를 실제로 실행하고 다음 movement step이 thrust와 steer 없이 drag만 적용하는지 단언한다. 실제 viewport focus 이동은 Final Verification의 PIE 항목에서 별도로 확인한다. 두 번째 fixture는 release를 queue한 뒤 manual mode를 비활성화하고 autopilot 값을 두 setter로 기록한 다음 Completed와 Canceled를 처리해 늦은 release가 값을 지우지 않는지 검사한다.
+FocusLossAndAutopilotGuard는 headless automation이 OS window focus를 만들었다고 가장하지 않는다. 먼저 ini가 viewport focus loss에서 `APlayerController::FlushPressedKeys()`로 이어지는 engine policy를 켰는지 확인한다. 즉시 rebuild를 마친 fixture에서 W와 A를 실제 주입하고 throttle이 양수, steer가 음수임을 먼저 단언해 이미 0인 값으로 통과하는 false GREEN을 차단한다. 그런 다음 같은 controller의 검증된 `FlushPressedKeys()` 경로를 실행해 두 입력이 0이고 다음 movement step이 thrust와 steer 없이 drag만 적용하는지 단언한다. 실제 viewport focus 이동은 Final Verification의 PIE 항목에서 별도로 확인한다. 두 번째 fixture는 release를 queue한 뒤 manual mode를 비활성화하고 autopilot 값을 두 setter로 기록한 다음 Completed와 Canceled를 처리해 늦은 release가 값을 지우지 않는지 검사한다.
 
 ~~~cpp
 bool FShipPawnFocusLossTest::RunTest(const FString&)
@@ -1637,7 +1679,11 @@ bool FShipPawnFocusLossTest::RunTest(const FString&)
         AShipPawn& Pawn = Input.PossessShip();
         UShipMovement& Movement = FShipPawnTestAccessor::Movement(Pawn);
         Input.Press(EKeys::W);
-        Input.Press(EKeys::D);
+        TestTrue(TEXT("W produces non-zero throttle before flush"),
+            FShipMovementTestAccessor::Throttle(Movement) > 0.99);
+        Input.Press(EKeys::A);
+        TestTrue(TEXT("A produces non-zero steer before flush"),
+            FShipMovementTestAccessor::Steer(Movement) < -0.99);
         FShipMovementTestAccessor::SetState(Movement, 100.0, 0.0);
         Input.Controller->FlushPressedKeys();
         Input.TickInput();
@@ -1679,10 +1725,16 @@ bool FShipPawnFocusLossTest::RunTest(const FString&)
 }
 ~~~
 
+세 Pawn RunTest 본문 뒤 파일 tail은 다음 한 줄로 끝난다. Task 4 RED, GREEN과 commit 시점의 계약은 opening 1개, closing 1개, macro 11개다.
+
+~~~cpp
+#endif // WITH_DEV_AUTOMATION_TESTS
+~~~
+
 - [ ] **Step 2: RED build 확인**
 
 ~~~powershell
-Invoke-ExpectedRedBuild -Stage "Task4" -ExpectedFailurePattern 'AShipPawn|ManualControlMapping|TestManualMappingRemovalCount|DefaultInput|UEnhancedInput'
+Invoke-ExpectedRedBuild -Stage "Task4" -ExpectedTests 11 -ExpectedFailurePattern 'AShipPawn|ManualControlMapping|TestManualMappingRemovalCount|DefaultInput|UEnhancedInput'
 ~~~
 
 Expected: AShipPawn의 component, 실제 input lifecycle seam 또는 DefaultInput 계약 부재로 build가 실패하고 editor는 실행하지 않는다.
@@ -2008,7 +2060,7 @@ bShouldFlushPressedKeysOnViewportFocusLost=True
 Invoke-ShipGreenGate -ExpectedTests 11 -Stage "Task4"
 ~~~
 
-Expected: build exit 0 뒤 발견 11, Success 11, failure 및 automation error 0, clean exit marker 1개 이상이다. Pawn tests는 실제 Triggered, Completed, Canceled, UnPossessed, EndPlay, mapping 제거 횟수 1, controller pressed-key flush 뒤 drag-only step과 늦은 release 뒤 autopilot 입력 보존을 단언한다. OS focus 전환 자체는 PIE에서 보완 검증한다.
+Expected: guard opening 및 closing 각 1개와 macro 11개를 먼저 확인하고, build exit 0 뒤 발견 11, Success 11, failure 및 automation error 0, clean exit marker 1개 이상이다. Pawn tests는 즉시 mapping rebuild 뒤 W throttle과 A steer가 비영 값임을 먼저 증명하고, 실제 Triggered, Completed, Canceled, UnPossessed, EndPlay, mapping 제거 횟수 1, controller pressed-key flush 뒤 drag-only step과 늦은 release 뒤 autopilot 입력 보존을 단언한다. OS focus 전환 자체는 PIE에서 보완 검증한다.
 
 - [ ] **Step 9: Task 4 commit**
 
@@ -2036,7 +2088,7 @@ git commit -m "feat: 선박 수동 입력과 카메라 구성" -m "변경 이유
 
 - [ ] **Step 1: GameMode RED test 추가**
 
-Task 4의 LocalPlayer fixture가 `SetGameMode`, `InitializeActorsForPlay`, `SpawnPlayActor`, `UWorld::BeginPlay`를 실행하게 한다. ASimGameMode actor의 BeginPlay는 정상 actor lifecycle에서 정확히 한 번만 실행한다. spawn과 possession의 멱등 부분은 private `EnsureTestShipForFirstPlayer()` helper로 추출하고 test는 BeginPlay가 아니라 이 helper만 두 번 더 호출한다. 이로써 `AActor::DispatchBeginPlay` 상태 전제를 위반하지 않고도 반복성을 검증한다.
+Task 4 파일 마지막의 closing `#endif`를 GameMode macro, accessor와 RunTest 본문 뒤로 옮기고 아래 block 끝에서 다시 파일 마지막 줄로 둔다. Task 4의 LocalPlayer fixture가 `SetGameMode`, `InitializeActorsForPlay`, `SpawnPlayActor`, `UWorld::BeginPlay`를 실행하게 한다. ASimGameMode actor의 BeginPlay는 정상 actor lifecycle에서 정확히 한 번만 실행한다. spawn과 possession의 멱등 부분은 private `EnsureTestShipForFirstPlayer()` helper로 추출하고 test는 BeginPlay가 아니라 이 helper만 두 번 더 호출한다. 이로써 `AActor::DispatchBeginPlay` 상태 전제를 위반하지 않고도 반복성을 검증한다.
 
 ~~~cpp
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSimGameModeBootstrapTest,
@@ -2058,7 +2110,7 @@ struct FSimGameModeTestAccessor
 bool FSimGameModeBootstrapTest::RunTest(const FString&)
 {
     FScopedShipInputWorld Input;
-    Input.StartPlay();
+    AShipPawn& InputShip = Input.PossessShip();
     ASimGameMode* GameMode = Cast<ASimGameMode>(Input.World->GetAuthGameMode());
     TestNotNull(TEXT("project GameMode exists"), GameMode);
     if (GameMode == nullptr)
@@ -2073,6 +2125,7 @@ bool FSimGameModeBootstrapTest::RunTest(const FString&)
     TestNotNull(TEXT("real Enhanced subsystem"), Input.Subsystem);
     AShipPawn* PossessedShip = Cast<AShipPawn>(Input.Controller->GetPawn());
     TestNotNull(TEXT("ship possessed"), PossessedShip);
+    TestTrue(TEXT("fixture returned possessed ship"), PossessedShip == &InputShip);
     if (PossessedShip != nullptr)
     {
         TestNotNull(TEXT("possessed ship has Enhanced input component"),
@@ -2100,12 +2153,12 @@ bool FSimGameModeBootstrapTest::RunTest(const FString&)
 #endif // WITH_DEV_AUTOMATION_TESTS
 ~~~
 
-이 `#endif`가 ShipMovementTests.cpp의 유일한 closing guard다. 파일 첫 줄의 opening guard보다 앞이나 이 줄보다 뒤에 include, macro, fixture 또는 RunTest 구현을 두지 않는다.
+이 `#endif`가 ShipMovementTests.cpp의 유일한 closing guard다. 파일 첫 줄의 opening guard보다 앞이나 이 줄보다 뒤에 include, macro, fixture 또는 RunTest 구현을 두지 않는다. Task 5 RED, GREEN과 commit 시점에는 opening 1개, closing 1개, macro 12개여야 한다.
 
 - [ ] **Step 2: RED build 확인**
 
 ~~~powershell
-Invoke-ExpectedRedBuild -Stage "Task5" -ExpectedFailurePattern 'EnsureTestShipForFirstPlayer|ShipPawnClass|TestShipSpawnTransform|FSimGameModeBootstrapTest'
+Invoke-ExpectedRedBuild -Stage "Task5" -ExpectedTests 12 -ExpectedFailurePattern 'EnsureTestShipForFirstPlayer|ShipPawnClass|TestShipSpawnTransform|FSimGameModeBootstrapTest'
 ~~~
 
 Expected: idempotent helper, ShipPawnClass, TestShipSpawnTransform 또는 spawn 구현 부재로 build가 실패하고 editor는 실행하지 않는다.
@@ -2192,7 +2245,7 @@ void ASimGameMode::EnsureTestShipForFirstPlayer()
 Invoke-ShipGreenGate -ExpectedTests 12 -Stage "Task5"
 ~~~
 
-Expected: build exit 0 뒤 발견 12, Success 12, failure 및 automation error 0, clean exit marker 1개 이상이다. Bootstrap test는 정상 BeginPlay 한 번, helper 두 번, ship 한 대와 같은 possession을 단언한다. ShipNavigator, CourseBuilder, ShipCapture 파일은 diff에 없어야 한다.
+Expected: guard opening 및 closing 각 1개와 macro 12개를 먼저 확인하고, build exit 0 뒤 발견 12, Success 12, failure 및 automation error 0, clean exit marker 1개 이상이다. Bootstrap test는 정상 BeginPlay 한 번, helper 두 번, ship 한 대와 같은 possession을 단언한다. ShipNavigator, CourseBuilder, ShipCapture 파일은 diff에 없어야 한다.
 
 - [ ] **Step 5: Task 5 commit**
 
@@ -2442,9 +2495,10 @@ Expected: 제품 변경은 File Structure의 생성 및 수정 목록만 포함�
 
 - [x] 설계의 목표, 수식, 안전 경계, Water 다섯 상태, input lifecycle, PIE 및 FPS 합격표를 Task와 검증에 대응시킴
 - [x] Task 간 interface 이름과 타입을 Public and Private Interfaces에 고정함
-- [x] 5개 Task와 고유 Automation Test 12개를 유지하고 test translation unit 전체를 하나의 WITH_DEV_AUTOMATION_TESTS guard로 감쌈
+- [x] 5개 Task와 고유 Automation Test 12개를 유지하고 Task 1부터 각 commit 시점에 test translation unit의 opening 및 closing guard 각 1개와 누적 macro 4, 6, 8, 11, 12개를 강제함
 - [x] GameMode BeginPlay는 정상 world lifecycle에서 한 번만 실행하고 idempotent helper만 반복 호출하도록 분리함
 - [x] LocalPlayer, 실제 Enhanced subsystem과 component, InputKey, PlayerTick, FlushPressedKeys, UnPossessed와 EndPlay 경로를 test code로 고정함
+- [x] `bForceImmediately=true`인 RequestRebuildControlMappings를 첫 InputKey 전에 호출하고 W/A가 비영 값을 만든 뒤에만 flush 결과를 검사함
 - [x] Completed와 Canceled release handler 모두 manual-active guard를 거치며 늦은 event 뒤 autopilot setter 값 보존을 단언함
 - [x] runtime source 전체 transform mutator denylist와 swept actor move 및 고정 child setup의 exact whitelist를 고정함
 - [x] 정상, Water fallback과 오류 tick 모두 scope-exit에서 debug를 frame당 정확히 한 번 호출함
