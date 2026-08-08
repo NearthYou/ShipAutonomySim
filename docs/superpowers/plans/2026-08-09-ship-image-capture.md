@@ -238,6 +238,8 @@ runtime log marker는 `Stage5CaptureStarted`, `Stage5CapturePair`, `Stage5Captur
 
 ```cpp
 #if WITH_DEV_AUTOMATION_TESTS
+class AShipPawn;
+
 enum class EShipCaptureTestFailurePoint : uint8
 {
     None,
@@ -246,12 +248,53 @@ enum class EShipCaptureTestFailurePoint : uint8
     ManifestTempWrite
 };
 
+struct FShipCaptureRigSnapshot
+{
+    bool bSetupSucceeded = false;
+    int32 CaptureMountCount = 0;
+    int32 ColorCaptureCount = 0;
+    int32 DepthCaptureCount = 0;
+    int32 ShipCaptureCount = 0;
+    bool bSameAttachParent = false;
+    bool bIdentityRelativeTransforms = false;
+    bool bSameWorldTransform = false;
+    bool bPerspectiveProjection = false;
+    bool bAutomaticCaptureDisabled = false;
+    bool bColorSourceFinalColorLdr = false;
+    bool bDepthSourceSceneDepth = false;
+    bool bColorTargetBgra8 = false;
+    bool bDepthTargetR32Float = false;
+    bool bFixedColorExposure = false;
+    int32 Resolution = 0;
+    float FovDegrees = 0.0f;
+};
+
+struct FShipCaptureTransactionSnapshot
+{
+    bool bSucceeded = false;
+    int32 ColorCaptureSceneCallCount = 0;
+    int32 DepthCaptureSceneCallCount = 0;
+    int64 ColorReadbackPixelCount = 0;
+    int64 DepthReadbackPixelCount = 0;
+    TArray<FLinearColor> RawDepthSamples;
+    TArray64<uint8> ColorPngBytes;
+    TArray64<uint8> DepthPngBytes;
+};
+
 struct FShipCaptureAutomationAccessor
 {
+    static FShipCaptureRigSnapshot SetupRigOnly(AShipPawn& Pawn);
     static void SetCaptureResolution(UShipCapture& Capture, int32 Resolution);
+    static void SetDepthRelativeLocationForTest(
+        UShipCapture& Capture,
+        const FVector& RelativeLocation);
     static void SetFailurePoint(
         UShipCapture& Capture,
         EShipCaptureTestFailurePoint FailurePoint);
+    static FShipCaptureTransactionSnapshot CaptureSingleTransaction(
+        UShipCapture& Capture,
+        int32 FrameIndex,
+        double CaptureSeconds);
     static bool StartCaptureAt(
         UShipCapture& Capture,
         double WallSlideCm,
@@ -270,6 +313,8 @@ struct FShipCaptureAutomationAccessor
 };
 #endif
 ```
+
+`SetupRigOnly`는 Pawn에 이미 bind된 rig의 target 생성, 설정과 validation까지만 수행해 실제 component에서 읽은 `FShipCaptureRigSnapshot`을 반환한다. `bAutomaticCaptureDisabled`는 두 capture의 every-frame, movement, persistent-state flag가 모두 false일 때만 true고, `bFixedColorExposure`는 manual method, bias 0, physical exposure false, blend weight 1이 모두 맞을 때만 true다. `Resolution`과 `FovDegrees`는 두 capture가 같은 값일 때만 그 값을 담고 불일치하면 0을 담는다. clock, run directory, `CaptureScene`, readback, file I/O와 lifecycle 전이는 금지한다. `CaptureSingleTransaction`은 test counter를 0으로 초기화한 뒤 production private transaction을 정확히 한 번 호출하고 filesystem 게시 없이 결과를 snapshot으로 복사한다. `SetDepthRelativeLocationForTest`는 transaction preflight 실패를 만들기 위한 유일한 rig 변형 경로다. Task 2와 Task 3 test는 component나 private buffer를 직접 읽지 않고 이 세 함수와 두 snapshot만으로 production 상태와 결과를 단언한다.
 
 production `StartCapture`은 private `StartCaptureAt(WallSlideCm, FPlatformTime::Seconds())`를 호출하고 `TickComponent`는 private `TickAtTime(FPlatformTime::Seconds())`를 호출한다. 각 public 경로는 clock을 한 번만 읽는다. accessor는 같은 private path에 명시적인 `NowSeconds`만 전달하며 clock interface나 service object를 만들지 않는다.
 
@@ -471,6 +516,80 @@ function Invoke-NullRhiEditorAutomation {
         throw "Expected $ExpectedCount tests, found $Started for $Filter"
     }
 }
+
+function Assert-Stage5ActualWorldRunLog {
+    param(
+        [Parameter(Mandatory=$true)][string]$Log,
+        [Parameter(Mandatory=$true)]
+        [ValidateSet('Validation', 'Performance')][string]$Mode
+    )
+
+    $Text = Get-Content -LiteralPath $Log -Raw -Encoding UTF8
+    $Started = ([regex]::Matches($Text, 'Test Started\. Name=')).Count
+    $CompletedSuccess = ([regex]::Matches(
+        $Text,
+        'Test Completed\. Result=\{Success\}')).Count
+    if ($Started -ne 1 -or $CompletedSuccess -ne 1) {
+        throw "Stage5 $Mode expected one started and one successful test; started=$Started successful=$CompletedSuccess"
+    }
+    if ($Text -match 'Result=\{(?:Fail(?:ure)?|Error|Unknown)\}|Unknown test|Fatal error:|Ensure condition failed') {
+        throw "Stage5 $Mode failure, error, unknown or ensure marker found"
+    }
+    if ($Text -notmatch 'TEST COMPLETE\. EXIT CODE: 0') {
+        throw "Stage5 $Mode TEST COMPLETE exit marker missing"
+    }
+    if ($Text -notmatch 'LogExit: Exiting\.') {
+        throw "Stage5 $Mode normal LogExit marker missing"
+    }
+
+    if ($Mode -eq 'Validation') {
+        $Rows = @([regex]::Matches(
+            $Text,
+            '(?m)^.*Stage5ActualWorldCase\b[^\r\n]*$') | ForEach-Object Value)
+        $SuccessRows = @($Rows | Where-Object { $_ -match '\boutcome=success\b' })
+        $CaptureOffRows = @($Rows | Where-Object { $_ -match '\bphase=capture_off\b' })
+        $CaptureOnRows = @($Rows | Where-Object { $_ -match '\bphase=capture_on\b' })
+        $Summary = 'Stage5ActualWorldSummary cases=14 success=14 failure=0 error=0 unknown=0 ensure=0'
+        if ($Rows.Count -ne 14 -or $SuccessRows.Count -ne 14 -or
+            $CaptureOffRows.Count -ne 11 -or $CaptureOnRows.Count -ne 3) {
+            throw "Stage5 validation rows total/success/off/on=$($Rows.Count)/$($SuccessRows.Count)/$($CaptureOffRows.Count)/$($CaptureOnRows.Count)"
+        }
+        if (([regex]::Matches($Text, 'Stage5ActualWorldSummary\b')).Count -ne 1 -or
+            ([regex]::Matches($Text, [regex]::Escape($Summary))).Count -ne 1) {
+            throw 'Stage5 validation exact zero-failure summary missing or duplicated'
+        }
+        return
+    }
+
+    $RunRows = @([regex]::Matches(
+        $Text,
+        '(?m)^.*Stage5PerformanceRun\b[^\r\n]*$') | ForEach-Object Value)
+    $AggregateRows = ([regex]::Matches($Text, 'Stage5PerformanceAggregate\b')).Count
+    $TransactionRows = ([regex]::Matches($Text, 'Stage5PerformanceTransaction\b')).Count
+    $IntervalRows = ([regex]::Matches($Text, 'Stage5PerformanceInterval\b')).Count
+    $SuccessRows = @($RunRows | Where-Object { $_ -match '\boutcome=success\b' })
+    $ExpectedOrder = @(
+        'order=1 condition=A',
+        'order=2 condition=B',
+        'order=3 condition=B',
+        'order=4 condition=A'
+    )
+    if ($RunRows.Count -ne 4 -or $AggregateRows -ne 2 -or
+        $TransactionRows -ne 2 -or $IntervalRows -ne 2 -or
+        $SuccessRows.Count -ne 4) {
+        throw "Stage5 performance row counts run/aggregate/transaction/interval/success=$($RunRows.Count)/$AggregateRows/$TransactionRows/$IntervalRows/$($SuccessRows.Count)"
+    }
+    for ($Index = 0; $Index -lt $ExpectedOrder.Count; ++$Index) {
+        if ($RunRows[$Index] -notmatch [regex]::Escape($ExpectedOrder[$Index])) {
+            throw "Stage5 performance order mismatch row=$($Index + 1)"
+        }
+    }
+    $Summary = 'Stage5PerformanceSummary runs=4 success=4 failure=0 error=0 unknown=0 ensure=0'
+    if (([regex]::Matches($Text, 'Stage5PerformanceSummary\b')).Count -ne 1 -or
+        ([regex]::Matches($Text, [regex]::Escape($Summary))).Count -ne 1) {
+        throw 'Stage5 performance exact zero-failure summary missing or duplicated'
+    }
+}
 ```
 
 Test-first source가 아직 선언되지 않은 symbol을 참조해 compile이 실패하면 해당 compiler error와 non-zero exit가 RED 증거다. compile되는 RED는 targeted Automation의 named assertion failure와 non-zero test result를 보존한다. GREEN은 방금 추가한 test뿐 아니라 각 task가 지정한 회귀 shard까지 통과해야 한다.
@@ -488,8 +607,8 @@ Test-first source가 아직 선언되지 않은 symbol을 참조해 compile이 �
 
 #### Steps
 
-- [ ] 3분: `FShipCaptureFrameRecord`만 `ShipCapture.h`에 추가하고 generated header가 마지막 include라는 기존 규칙을 유지한다.
-- [ ] 4분: `ShipCaptureTests.cpp`에 `ShipAutonomySim.ShipCapture.Unit.Scheduler`를 먼저 등록하고 frame 0 time 0, 99 ms NotDue, 100 ms Due를 assertion한다.
+- [ ] 3분: production header나 source를 건드리지 않은 채 `ShipCaptureTests.cpp`를 먼저 만들고 아직 없는 `ShipCaptureSimulation.h`를 include한 뒤 exact `InitializeCaptureClock`, `AdvanceCaptureSchedule`, `NormalizeSceneDepthToG8`, `MakeCaptureFrameLeafNames`, `ValidateAndAppendCaptureFrame`, `IsValidCaptureWallSlide`를 호출한다.
+- [ ] 4분: 같은 test file에 `ShipAutonomySim.ShipCapture.Unit.Scheduler`를 등록하고 frame 0 time 0, 99 ms NotDue, 100 ms Due를 assertion한다.
 - [ ] 4분: 같은 test에 550 ms hitch가 한 번만 Due이고 바로 다음 같은 시각은 NotDue, 이후 새 99 ms는 NotDue, 새 100 ms는 Due인 case를 추가한다.
 - [ ] 3분: actual `time_ms`가 frame index 곱이 아니라 주입한 `NowSeconds - FirstCaptureSeconds`의 rounded 값인지 검사한다.
 - [ ] 3분: clock rollback, NaN, positive infinity, frame 1 이후 이전과 같은 rounded timestamp가 `Invalid`인지 검사한다.
@@ -497,8 +616,10 @@ Test-first source가 아직 선언되지 않은 symbol을 참조해 compile이 �
 - [ ] 3분: 같은 test에 NaN과 infinity가 0, sample count mismatch와 non-finite bound, `near >= far`가 false를 반환하고 output을 비우는지 추가한다.
 - [ ] 4분: `ShipAutonomySim.ShipCapture.Unit.FrameRecords`를 등록하고 `000000`, `999999`, 1000000 거부, index 0 연속 append와 duplicate, gap, 음수 time 거부를 검사한다.
 - [ ] 3분: 같은 test에서 build slide와 resolved slide가 각각 non-finite인 경우, 차이가 `1e-9` 초과인 경우 false, 정확히 `1e-9` 이하는 true인지 검사한다.
-- [ ] 2분: `Invoke-ShipEditorBuild`로 RED를 실행해 missing helper declarations 또는 named assertions의 실패를 기록한다.
-- [ ] 5분: `ShipCaptureSimulation.h/.cpp`에 고정 함수만 구현한다. scheduler는 `while`, world time, `DeltaTime`, catch-up count를 사용하지 않는다.
+- [ ] 2분: 이 시점에는 test file만 추가된 상태로 `Invoke-ShipEditorBuild`를 실행한다. `ShipCaptureSimulation.h` 부재와 그 exact symbol을 사용할 수 없다는 compiler error, non-zero exit를 첫 RED로 보존하며 이 RED 전에는 `ShipCapture.h`를 포함한 production 파일을 수정하지 않는다.
+- [ ] 4분: 첫 RED 뒤에만 `FShipCaptureFrameRecord`를 `ShipCapture.h`에 추가해 generated header가 마지막 include라는 기존 규칙을 유지하고, `ShipCaptureSimulation.h`에 위 여섯 exact 함수와 관련 enum/step 선언만 추가한다. `ShipCaptureSimulation.cpp` 정의는 아직 추가하지 않는다.
+- [ ] 2분: `Invoke-ShipEditorBuild`를 다시 실행해 compile은 통과하지만 exact `InitializeCaptureClock`, `AdvanceCaptureSchedule`, `NormalizeSceneDepthToG8`를 포함한 helper 정의가 없어서 `LNK2019 unresolved external symbol`과 non-zero exit가 나는 두 번째 RED를 보존한다.
+- [ ] 5분: 이제 `ShipCaptureSimulation.cpp`에 고정 함수의 최소 정의만 구현한다. scheduler는 `while`, world time, `DeltaTime`, catch-up count를 사용하지 않는다.
 - [ ] 4분: depth 구현은 각 sample의 R만 읽고 G/B/A를 normalization 입력으로 사용하지 않는다. intermediate와 output이 유한한지 검사한다.
 - [ ] 3분: record append는 candidate index가 `Frames.Num()`, leaf 이름이 helper 결과와 일치, frame 0 time 0, 이후 time strictly increasing일 때만 append한다.
 - [ ] 3분: build 후 `Invoke-RenderedEditorAutomation 'ShipAutonomySim.ShipCapture.Unit' 'Stage5-Task1-GREEN.log' 3`을 실행한다.
@@ -532,10 +653,9 @@ git commit -m "test: 캡처 순수 계약 고정" `
 
 #### Steps
 
-- [ ] 4분: `ShipAutonomySim.ShipCapture.Component.RigConfiguration`을 먼저 등록하고 Pawn에 mount, color, depth, capture component가 각각 하나인지 검사한다.
-- [ ] 4분: 두 capture의 attach parent가 같은 mount, relative transform identity, world transform equal, perspective, FOV 90, default resolution 512인지 assertion한다.
-- [ ] 4분: auto capture 세 flag가 false이고 color source가 `SCS_FinalColorLDR`, depth source가 `SCS_SceneDepth`인지 assertion한다.
-- [ ] 4분: color target `PF_B8G8R8A8`, depth target `PF_R32_FLOAT`, color fixed exposure method, bias 0, physical exposure false를 assertion한다.
+- [ ] 4분: `ShipAutonomySim.ShipCapture.Component.RigConfiguration`을 먼저 등록하고 Pawn 생성 뒤 `FShipCaptureAutomationAccessor::SetupRigOnly(*Pawn)`을 호출한다. test는 반환된 `FShipCaptureRigSnapshot`만 읽어 setup 성공과 mount, color, depth, capture component가 각각 하나인지 검사한다.
+- [ ] 4분: 같은 snapshot만으로 두 capture의 attach parent가 같은 mount, relative transform identity, world transform equal, perspective, FOV 90, default resolution 512인지 assertion한다.
+- [ ] 4분: 같은 snapshot의 auto capture disabled, `SCS_FinalColorLDR`, `SCS_SceneDepth`, `PF_B8G8R8A8`, `PF_R32_FLOAT`, manual exposure, bias 0, physical exposure false 결과를 assertion한다. test에서 Pawn subobject, SceneCapture, render target이나 post-process field를 직접 읽지 않는다.
 - [ ] 2분: build RED에서 missing Pawn subobjects, `GetCapture`, bind와 target 설정 실패를 보존한다.
 - [ ] 4분: `ShipCapture.h`에 고정 public API, UPROPERTY 기본값, transient mount/capture/target `TObjectPtr`, lifecycle와 failure state를 선언한다.
 - [ ] 3분: constructor를 `bCanEverTick = true`, `bStartWithTickEnabled = false`로 바꾸고 초기 state `NotStarted`를 유지한다.
@@ -552,7 +672,7 @@ CaptureMount->SetRelativeLocationAndRotation(
 
 - [ ] 5분: 두 capture에 perspective, 동일 FOV, auto flag false를 설정하고 color와 depth target을 `NewObject<UTextureRenderTarget2D>(this)`로 만든 뒤 각각 `InitCustomFormat`한다.
 - [ ] 4분: color post process를 manual exposure, bias 0, physical camera exposure false, blend weight 1로 고정한다.
-- [ ] 3분: target 생성과 rig validation까지만 하는 test-only setup path를 accessor로 열고 일반 public API에는 노출하지 않는다.
+- [ ] 3분: 위 exact `SetupRigOnly`와 `FShipCaptureRigSnapshot`을 `WITH_DEV_AUTOMATION_TESTS` 안에서 구현하고 일반 public API에는 노출하지 않는다.
 - [ ] 4분: `ShipMovementTests.cpp`의 whitelist에 위 compact component line 한 개만 추가하고 actor mutator file count에 `ShipCapture.cpp` expected 0을 추가한다.
 - [ ] 3분: build 후 `Invoke-RenderedEditorAutomation 'ShipAutonomySim.ShipCapture.Component.RigConfiguration' 'Stage5-Task2-Rig-GREEN.log' 1`을 실행한다.
 - [ ] 3분: `Invoke-RenderedEditorAutomation 'ShipAutonomySim.ShipMovement.Runtime.TransformOwnership' 'Stage5-Task2-Transform-GREEN.log' 1`을 실행한다.
@@ -585,12 +705,12 @@ git commit -m "feat: 선박 캡처 공통 리그 구성" `
 
 #### Steps
 
-- [ ] 5분: `ShipAutonomySim.ShipCapture.Image.ReadbackAndEncoding`을 먼저 등록하고 작은 rendered test world, 32 x 32 test resolution, capture 앞의 known cube를 준비한다.
-- [ ] 4분: pair 직전 두 capture parent, relative/world transform, perspective, FOV와 target size equality가 깨지면 capture call 없이 failure가 latch되는 RED assertion을 추가한다.
-- [ ] 4분: color와 depth `CaptureScene()`이 한 logical instant에서 순서대로 한 번씩 호출되고 두 pixel array가 정확히 1024개인지 검사한다.
-- [ ] 4분: depth target format이 `PF_R32_FLOAT`, `ReadLinearColorPixels` 결과의 R이 유한한 view-Z이고 G 0, B 0, A 1인지 검사한다.
-- [ ] 4분: color PNG signature, decoded width와 height 32, BGRA8 8-bit browser-readable 결과를 검사한다.
-- [ ] 4분: depth PNG를 `DecompressImage`로 decode해 `ERawImageFormat::G8`, 8-bit, 32 x 32이며 near cube sample이 far background보다 밝은지 검사한다.
+- [ ] 5분: `ShipAutonomySim.ShipCapture.Image.ReadbackAndEncoding`을 먼저 등록하고 작은 rendered test world, capture 앞의 known cube를 준비한 뒤 accessor의 `SetupRigOnly`, `SetCaptureResolution(..., 32)`, `CaptureSingleTransaction(..., 0, 0.0)`만 호출한다.
+- [ ] 4분: `SetDepthRelativeLocationForTest`로 optical mismatch를 만든 뒤 반환된 `FShipCaptureTransactionSnapshot`의 실패와 color/depth capture call count 0을 검사한다. test가 capture component를 직접 바꾸거나 읽지 않는다.
+- [ ] 4분: 정상 snapshot에서 color와 depth `CaptureScene()` call count가 각각 1이고 color/depth readback pixel count가 각각 1024인지 검사한다.
+- [ ] 4분: 같은 snapshot의 `RawDepthSamples`가 정확히 1024개이고 각 R이 유한한 view-Z이며 G 0, B 0, A 1인지 검사한다.
+- [ ] 4분: snapshot의 `ColorPngBytes`만 decode해 PNG signature, width와 height 32, BGRA8 8-bit browser-readable 결과를 검사한다.
+- [ ] 4분: snapshot의 `DepthPngBytes`만 `DecompressImage`로 decode해 `ERawImageFormat::G8`, 8-bit, 32 x 32이며 near cube sample이 far background보다 밝은지 검사한다. Task 3의 모든 production 결과 assertion은 이 단일 transaction snapshot을 통한다.
 - [ ] 2분: build RED에서 missing capture transaction 또는 failed assertions를 기록한다.
 - [ ] 4분: `CaptureAndEncodePair` private path가 frame index와 capture seconds를 먼저 값으로 고정하고 optical equality를 재검증하게 한다.
 - [ ] 3분: `ColorCapture->CaptureScene();` 다음 줄 흐름에서 world tick, actor write, readback 없이 `DepthCapture->CaptureScene();`을 호출한다.
@@ -787,6 +907,7 @@ git commit -m "feat: 캡처 실행 orchestration 연결" `
 - [ ] 4분: runtime optical equality, setup/runtime/collision/timeout/ensure/crash 0과 minimum wall gap 0 초과를 요구한다.
 - [ ] 4분: 각 capture-on run의 exact Automation directory를 accessor로 기록하고 manifest 검사가 끝난 뒤에만 안전 parent check를 통과한 exact 세 directory를 정리한다.
 - [ ] 3분: final state에서 validation result를 capture-off 11행과 capture-on 3행으로 별도 log table에 출력한다.
+- [ ] 3분: 각 행 marker를 exact `Stage5ActualWorldCase`로 고정해 `phase=capture_off|capture_on`, slide와 `outcome=success`를 넣고, 마지막에 exact `Stage5ActualWorldSummary cases=14 success=14 failure=0 error=0 unknown=0 ensure=0`을 한 번 출력한다.
 - [ ] 2분: 아직 구현하지 않은 phase enum과 acceptance를 먼저 빌드해 RED compile 또는 case count failure를 기록한다.
 - [ ] 5분: latent command에 `RegressionCaptureOff`, `CaptureOnAcceptance`, `Finished` phase와 phase별 case 배열을 최소 추가한다.
 - [ ] 4분: 기존 fresh-world identity, watchdog, hull gap 계산과 result 구조를 재사용하고 별도 actual-world test를 등록하지 않는다.
@@ -817,9 +938,10 @@ if (-not $Process.WaitForExit(1200000)) {
 if ($Process.ExitCode -ne 0) {
     throw "Actual-world validation failed exit=$($Process.ExitCode)"
 }
+Assert-Stage5ActualWorldRunLog -Log $Log -Mode Validation
 ```
 
-- [ ] 3분: log에서 test start와 complete 1, regression cases 11, capture cases 3, success 14, 모든 failure count 0, exit code 0과 normal shutdown을 확인한다.
+- [ ] 3분: 공통 `Assert-Stage5ActualWorldRunLog`가 test started 1, completed success 1, case row 14, row success 14, summary의 failure/error/unknown/ensure 0, `TEST COMPLETE. EXIT CODE: 0`, `LogExit: Exiting.`을 자동 판정하는지 확인한다.
 - [ ] 3분: `git diff --name-only -- ShipAutonomySim/Content ShipAutonomySim/Config ShipAutonomySim/ShipAutonomySim.uproject` 출력이 비어 있는지 확인한다.
 - [ ] 3분: 이 test 파일 하나만 stage하고 commit한다.
 
@@ -850,6 +972,8 @@ git commit -m "test: 실제 월드 캡처 회귀 추가" `
 - [ ] 4분: B run은 accessor에서 pair transaction milliseconds를 복사해 run별 count, min, median, p95, max를 출력한다. A run의 transaction count는 0이어야 한다.
 - [ ] 5분: B manifest의 adjacent `time_ms`로 pair count, 목표 100 ms, interval min/median/p95/max와 absolute deviation min/median/p95/max를 계산한다.
 - [ ] 3분: interval 200 ms 이상 count, duplicate timestamp count, 100 ms 미만 catch-up count를 run별과 B aggregate로 출력한다.
+- [ ] 4분: per-run marker는 exact `Stage5PerformanceRun`, A/B aggregate는 `Stage5PerformanceAggregate`, B transaction은 `Stage5PerformanceTransaction`, B interval과 deviation, 200 ms missed-slot, under-100 ms catch-up은 `Stage5PerformanceInterval`로 고정한다. run marker 네 행에는 순서대로 `order=1 condition=A`, `order=2 condition=B`, `order=3 condition=B`, `order=4 condition=A`와 `outcome=success`를 넣는다.
+- [ ] 2분: 마지막에 exact `Stage5PerformanceSummary runs=4 success=4 failure=0 error=0 unknown=0 ensure=0`을 한 번 출력한다.
 - [ ] 3분: p95, maximum, frame-time 변화에 pass/fail threshold를 추가하지 않고 관측값으로만 출력한다. data absence, duplicate, catch-up과 invalid manifest는 계약 실패로 유지한다.
 - [ ] 3분: A/B run의 terminal, setup, runtime, collision, timeout acceptance와 exact Automation directory cleanup은 Task 7과 동일하게 적용한다.
 - [ ] 2분: reporting 함수와 performance phase가 없는 상태의 RED compile 또는 mode assertion 실패를 기록한다.
@@ -883,9 +1007,10 @@ if (-not $Process.WaitForExit(1200000)) {
 if ($Process.ExitCode -ne 0) {
     throw "Performance A-B-B-A failed exit=$($Process.ExitCode)"
 }
+Assert-Stage5ActualWorldRunLog -Log $Log -Mode Performance
 ```
 
-- [ ] 4분: log에 run order A-B-B-A, per-run frame stats 4행, A/B aggregate 2행, B transaction stats 2행, manifest interval과 deviation, missed-slot와 catch-up counts가 모두 있는지 확인한다.
+- [ ] 4분: 공통 `Assert-Stage5ActualWorldRunLog`가 test started 1, completed success 1, A-B-B-A run 4행과 success 4, aggregate 2행, transaction 2행, interval 2행, summary의 failure/error/unknown/ensure 0, `TEST COMPLETE. EXIT CODE: 0`, `LogExit: Exiting.`을 자동 판정하는지 확인한다.
 - [ ] 3분: measured impact가 커도 async, lower resolution, alternative format 문자열이 implementation diff에 들어오지 않았는지 inspect한다.
 - [ ] 3분: test 파일 하나만 stage하고 commit한다.
 
@@ -909,13 +1034,41 @@ git commit -m "test: 캡처 성능 A-B-B-A 측정 추가" `
 
 #### Steps
 
-- [ ] 4분: 세 문서에서 Stage 4가 현재 마지막 범위거나 image capture가 제외라는 문장을 찾는 text assertion을 먼저 작성하고 현재 문서에서 RED를 확인한다.
+- [ ] 4분: 아래 inline PowerShell assertion을 문서 수정 전에 그대로 실행한다. 세 stale exact 문구가 각각 한 번 있어 `Stage5DocumentStaleExactMatches=3`과 child process exit 1을 내는 RED를 보존한다. 별도 assertion 파일은 만들지 않는다.
+
+```powershell
+powershell -NoProfile -Command {
+    $StaleExact = [ordered]@{
+        'README.md' = '이 저장소에는 정적 이미지 시퀀스 웹 뷰어와 별도의 Unreal Engine 5.5.4 과제 경로인 `ShipAutonomySim`이 함께 있습니다. Unreal 과제는 `/Game/Maps/MainLevel`과 Stage 3 수동 선박 이동이 준비된 상태이며, 코스 생성과 자율주행을 연결하는 Stage 4가 이번 구현 범위입니다.'
+        'ShipAutonomySim/SETUP.md' = '- 이미지 캡처와 관련 Blueprint는 이번 Stage 4 범위에서 만들지 않는다.'
+        'ShipAutonomySim/AGENTS.md' = '- PCG, 이미지 캡처와 웹 뷰어 연동은 이번 Stage 4 범위에 포함하지 않는다.'
+    }
+    $Matches = @(
+        foreach ($Entry in $StaleExact.GetEnumerator()) {
+            $Text = Get-Content -LiteralPath $Entry.Key -Raw -Encoding UTF8
+            if ($Text.IndexOf($Entry.Value, [StringComparison]::Ordinal) -ge 0) {
+                $Entry.Key
+            }
+        }
+    )
+    Write-Output "Stage5DocumentStaleExactMatches=$($Matches.Count)"
+    if ($Matches.Count -ne 0) {
+        $Matches | ForEach-Object { Write-Error "stale exact match: $_" }
+        exit 1
+    }
+    exit 0
+}
+if ($LASTEXITCODE -ne 0) {
+    throw "Stage 5 document assertion failed exit=$LASTEXITCODE"
+}
+```
+
 - [ ] 4분: root README에 Stage 5 자동 capture, `Saved/ShipCaptures/YYYYMMDDTHHMMSSmmmZ_GUIDDIGITS`, exact manifest와 viewer source 무변경 재생 절차를 최소 추가한다.
 - [ ] 4분: SETUP에 MainLevel Play 자동 시작, terminal 뒤 color/depth/manifest 위치, early PIE stop fail 결과와 수동 확인을 추가한다.
 - [ ] 4분: AGENTS에 Stage 5 책임, UE 5.5.4 local header 검증, UObject `UPROPERTY`, Build.cs dependency, project-relative log와 output, protected file 규칙을 추가한다.
 - [ ] 3분: 문서 어디에도 local absolute path, 사용자명, 외부 ID, 실제 완료하지 않은 성능 수치가 없는지 검사한다.
 - [ ] 3분: README의 viewer copy 절차가 선택 run의 `manifest.json`, `color_*.png`, `depth_*.png`만 root에 복사하고 확인 뒤 그 복사본만 exact cleanup하게 하는지 확인한다.
-- [ ] 3분: document assertion을 GREEN으로 실행하고 viewer source 변경 지시가 없는지 확인한다.
+- [ ] 3분: 세 문서 수정 뒤 같은 inline assertion을 다시 실행해 `Stage5DocumentStaleExactMatches=0`, child process exit 0인 GREEN을 확인하고 viewer source 변경 지시가 없는지 확인한다.
 - [ ] 3분: `git diff -- README.md ShipAutonomySim/SETUP.md ShipAutonomySim/AGENTS.md`로 범위와 사실 표현을 검토한다.
 - [ ] 2분: `git diff --check`를 실행한다.
 - [ ] 3분: 세 문서만 stage하고 commit한다.
@@ -987,26 +1140,79 @@ Invoke-NullRhiEditorAutomation 'ShipAutonomySim.ShipNavigation' 'Stage5-Final-Sh
 
 ### 3. MainLevel no-write load
 
-- [ ] `/Game/Maps/MainLevel`을 다음 command로 load한다.
+- [ ] `/Game/Maps/MainLevel?Stage5Capture=0`을 다음 command로 load한다. 기존 log가 있으면 덮어쓰지 않고 중단한다.
 
 ```powershell
+$CaptureRoot = Join-Path $ProjectRoot 'Saved\ShipCaptures'
 $Log = Join-Path $ProjectRoot 'Saved\Logs\Stage5-MainLevel-NoWrite.log'
-& $Editor $Project /Game/Maps/MainLevel `
-  -Unattended -NoSplash -NullRHI -NoAudio -NoPause -NoP4 -nowrite `
-  -ExecCmds='QUIT_EDITOR' "-abslog=$Log"
-if ($LASTEXITCODE -ne 0) {
-    throw "MainLevel no-write failed exit=$LASTEXITCODE"
+if (Test-Path -LiteralPath $Log) {
+    throw "Refusing to overwrite pre-existing no-write log: $Log"
 }
-$Text = Get-Content -LiteralPath $Log -Raw -Encoding UTF8
-if ($Text -notmatch 'Load map complete') {
-    throw 'MainLevel load marker missing'
+
+function Get-ShipCapturesSnapshot {
+    param([Parameter(Mandatory=$true)][string]$Root)
+    if (-not (Test-Path -LiteralPath $Root)) {
+        return '<absent>'
+    }
+    $CanonicalRoot = [IO.Path]::GetFullPath($Root).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar)
+    "D|.|$((Get-Item -LiteralPath $Root).LastWriteTimeUtc.Ticks)"
+    Get-ChildItem -LiteralPath $Root -Force -Recurse |
+        Sort-Object FullName |
+        ForEach-Object {
+            $Relative = $_.FullName.Substring($CanonicalRoot.Length).TrimStart(
+                [IO.Path]::DirectorySeparatorChar)
+            if ($_.PSIsContainer) {
+                "D|$Relative|$($_.LastWriteTimeUtc.Ticks)"
+            } else {
+                $Hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash
+                "F|$Relative|$($_.Length)|$($_.LastWriteTimeUtc.Ticks)|$Hash"
+            }
+        }
 }
-if ($Text -match 'LoadErrors|Fatal error|Ensure condition failed|MapCheck: Error|Crash') {
-    throw 'MainLevel no-write failure marker found'
+
+$BeforeCaptureSnapshot = @(Get-ShipCapturesSnapshot -Root $CaptureRoot)
+$CreatedLog = $false
+try {
+    & $Editor $Project '/Game/Maps/MainLevel?Stage5Capture=0' `
+      -Unattended -NoSplash -NullRHI -NoAudio -NoPause -NoP4 -nowrite `
+      -ExecCmds='QUIT_EDITOR' "-abslog=$Log"
+    $CreatedLog = Test-Path -LiteralPath $Log
+    if ($LASTEXITCODE -ne 0) {
+        throw "MainLevel no-write failed exit=$LASTEXITCODE"
+    }
+    if (-not $CreatedLog) {
+        throw 'MainLevel no-write log missing'
+    }
+    $Text = Get-Content -LiteralPath $Log -Raw -Encoding UTF8
+    if ($Text -notmatch 'Load map complete') {
+        throw 'MainLevel load marker missing'
+    }
+    if ($Text -match 'LoadErrors|Fatal error|Ensure condition failed|MapCheck: Error|Crash') {
+        throw 'MainLevel no-write failure marker found'
+    }
+    if ($Text -match 'Stage5Capture(?:Started|Pair|Failure|Finalized)') {
+        throw 'Capture marker found while Stage5Capture=0'
+    }
+    if ($Text -notmatch 'LogWorld:.*CleanupWorld' -or
+        $Text -notmatch 'LogExit: Exiting\.') {
+        throw 'MainLevel cleanup or normal LogExit marker missing'
+    }
+    $AfterCaptureSnapshot = @(Get-ShipCapturesSnapshot -Root $CaptureRoot)
+    if (@(Compare-Object $BeforeCaptureSnapshot $AfterCaptureSnapshot).Count -ne 0) {
+        throw 'Saved/ShipCaptures changed during capture-off no-write load; preserve entries for inspection'
+    }
+} finally {
+    if ($CreatedLog -and (Test-Path -LiteralPath $Log)) {
+        Remove-Item -LiteralPath $Log -Force
+    }
+}
+if (Test-Path -LiteralPath $Log) {
+    throw 'Exact no-write log cleanup failed'
 }
 ```
 
-- [ ] world 생성과 cleanup, MapCheck error 0, LoadErrors 0, fatal/ensure/crash 0과 clean exit를 log에서 확인한다.
+- [ ] 자동 판정이 `Saved/ShipCaptures`의 directory, file length, mtime, SHA-256 사전/사후 snapshot 동일성, capture marker 부재, world cleanup, MapCheck error 0, LoadErrors 0, fatal/ensure/crash 0, 정상 `LogExit`와 exact test log cleanup을 모두 요구하는지 확인한다. snapshot이 다르면 새 entry를 임의 삭제하지 않고 그대로 실패시킨다.
 
 ### 4. A-B, B-A 성능 실행
 
