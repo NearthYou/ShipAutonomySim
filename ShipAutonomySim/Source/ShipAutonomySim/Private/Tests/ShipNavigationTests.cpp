@@ -6,9 +6,11 @@
 #include "CourseBuilder.h"
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
+#include "Engine/LocalPlayer.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/TargetPoint.h"
 #include "Engine/World.h"
+#include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/AutomationTest.h"
 #include "ShipNavigationSimulation.h"
@@ -16,6 +18,7 @@
 #include "ShipMovement.h"
 #include "ShipMovementSimulation.h"
 #include "ShipNavigator.h"
+#include "ShipPawn.h"
 #include "SimGameMode.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -73,8 +76,20 @@ public:
         }
     }
 
+    void AddPlayer()
+    {
+        LocalPlayer = NewObject<ULocalPlayer>(GEngine, GEngine->LocalPlayerClass);
+        check(GameInstance->AddLocalPlayer(LocalPlayer, 0) == 0);
+        FString SpawnError;
+        check(LocalPlayer->SpawnPlayActor(TEXT(""), SpawnError, World));
+        Controller = LocalPlayer->GetPlayerController(World);
+        check(Controller != nullptr);
+    }
+
     UGameInstance* GameInstance = nullptr;
     UWorld* World = nullptr;
+    ULocalPlayer* LocalPlayer = nullptr;
+    APlayerController* Controller = nullptr;
 };
 
 struct FCourseBuilderTestAccessor
@@ -150,6 +165,66 @@ struct FShipNavigationGameModeTestAccessor
         const ASimGameMode& GameMode)
     {
         return GameMode.RuntimeErrorState;
+    }
+
+    static void SetWaterSurfaceOverride(
+        ASimGameMode& GameMode,
+        double WaterSurfaceZCm)
+    {
+        GameMode.TestWaterSurfaceOverrideCm = WaterSurfaceZCm;
+    }
+
+    static bool UsesRandomSlide(const ASimGameMode& GameMode)
+    {
+        return GameMode.bUseRandomSlide;
+    }
+
+    static TOptional<double> ForcedSlide(const ASimGameMode& GameMode)
+    {
+        return GameMode.ForcedSlideCm;
+    }
+
+    static int32 SetupFailureLogCount(const ASimGameMode& GameMode)
+    {
+        return GameMode.TestSetupFailureLogCount;
+    }
+
+    static int32 TerminalLogCount(const ASimGameMode& GameMode)
+    {
+        return GameMode.TestTerminalLogCount;
+    }
+
+    static int32 RuntimeErrorLogCount(const ASimGameMode& GameMode)
+    {
+        return GameMode.TestRuntimeErrorLogCount;
+    }
+
+    static int32 EnterAutonomyCallCount(const ASimGameMode& GameMode)
+    {
+        return GameMode.TestEnterAutonomyCallCount;
+    }
+
+    static void ResetTerminalState(ASimGameMode& GameMode)
+    {
+        GameMode.RunResult = EShipRunResult::Running;
+        GameMode.RuntimeErrorState = FShipRuntimeErrorState{};
+        GameMode.bTerminalLogged = false;
+        GameMode.TestTerminalLogCount = 0;
+    }
+
+    static void ApplyTerminalInputs(
+        ASimGameMode& GameMode,
+        bool bCollision,
+        bool bSuccess,
+        bool bTimeout)
+    {
+        const EShipRunResult Candidate = SelectTerminalResult(
+            FShipTerminalInputs{
+                bCollision,
+                bSuccess,
+                bTimeout,
+                GameMode.RuntimeErrorState.bLatched});
+        GameMode.LatchTerminalResult(Candidate);
     }
 };
 
@@ -714,6 +789,243 @@ bool FShipNavigatorControlCoastAndErrorTest::RunTest(const FString&)
         TEXT("stopping distance"),
         2,
         EShipRuntimeCalculationError::InvalidStoppingDistance);
+    return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipGameModeOptionBootstrapTest,
+    "ShipAutonomySim.ShipNavigation.Unit.GameMode.OptionBootstrap",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipGameModeTerminalRuntimeErrorTest,
+    "ShipAutonomySim.ShipNavigation.Unit.GameMode.TerminalRuntimeError",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FShipGameModeOptionBootstrapTest::RunTest(const FString&)
+{
+    struct FOptionCase
+    {
+        const TCHAR* Label;
+        const TCHAR* Options;
+        bool bExpectedRandom;
+        EShipSetupFailure ExpectedFailure;
+        bool bExpectedForced;
+        double ExpectedSlideCm;
+    };
+    const TArray<FOptionCase> Cases{
+        {TEXT("absent"), TEXT(""), true, EShipSetupFailure::None, false, 0.0},
+        {TEXT("empty"), TEXT("?Stage4Slide="), false,
+            EShipSetupFailure::SlideOptionEmpty, false, 0.0},
+        {TEXT("junk"), TEXT("?Stage4Slide=west"), false,
+            EShipSetupFailure::SlideOptionMalformed, false, 0.0},
+        {TEXT("conversion"), TEXT("?Stage4Slide=1e"), false,
+            EShipSetupFailure::SlideOptionMalformed, false, 0.0},
+        {TEXT("nan"), TEXT("?Stage4Slide=NaN"), false,
+            EShipSetupFailure::SlideOptionNonFinite, false, 0.0},
+        {TEXT("inf"), TEXT("?Stage4Slide=Inf"), false,
+            EShipSetupFailure::SlideOptionNonFinite, false, 0.0},
+        {TEXT("below"), TEXT("?Stage4Slide=-501"), false,
+            EShipSetupFailure::SlideOptionOutOfRange, false, -501.0},
+        {TEXT("above"), TEXT("?Stage4Slide=501"), false,
+            EShipSetupFailure::SlideOptionOutOfRange, false, 501.0},
+        {TEXT("lower"), TEXT("?Stage4Slide=-500"), false,
+            EShipSetupFailure::None, true, -500.0},
+        {TEXT("zero"), TEXT("?Stage4Slide=0"), false,
+            EShipSetupFailure::None, true, 0.0},
+        {TEXT("upper"), TEXT("?Stage4Slide=500"), false,
+            EShipSetupFailure::None, true, 500.0}
+    };
+
+    for (const FOptionCase& Case : Cases)
+    {
+        FScopedCourseTestWorld Fixture;
+        ASimGameMode* GameMode =
+            Cast<ASimGameMode>(Fixture.World->GetAuthGameMode());
+        TestNotNull(*FString::Printf(TEXT("%s GameMode"), Case.Label), GameMode);
+        if (GameMode == nullptr)
+        {
+            continue;
+        }
+        FString ErrorMessage;
+        GameMode->InitGame(TEXT("MainLevel"), Case.Options, ErrorMessage);
+        TestEqual(*FString::Printf(TEXT("%s random mode"), Case.Label),
+            FShipNavigationGameModeTestAccessor::UsesRandomSlide(*GameMode),
+            Case.bExpectedRandom);
+        TestEqual(*FString::Printf(TEXT("%s setup failure"), Case.Label),
+            GameMode->GetSetupFailure(),
+            Case.ExpectedFailure);
+        const TOptional<double> ForcedSlide =
+            FShipNavigationGameModeTestAccessor::ForcedSlide(*GameMode);
+        TestEqual(*FString::Printf(TEXT("%s forced state"), Case.Label),
+            ForcedSlide.IsSet(),
+            Case.bExpectedForced);
+        if (ForcedSlide.IsSet())
+        {
+            TestTrue(*FString::Printf(TEXT("%s forced value"), Case.Label),
+                FMath::IsNearlyEqual(
+                    ForcedSlide.GetValue(), Case.ExpectedSlideCm, 1e-9));
+        }
+        TestNull(*FString::Printf(TEXT("%s builder not spawned in InitGame"), Case.Label),
+            GameMode->GetCourseBuilder());
+        TestEqual(*FString::Printf(TEXT("%s classification has no error log"), Case.Label),
+            FShipNavigationGameModeTestAccessor::SetupFailureLogCount(*GameMode),
+            0);
+    }
+
+    {
+        FScopedCourseTestWorld Fixture;
+        ASimGameMode* GameMode =
+            Cast<ASimGameMode>(Fixture.World->GetAuthGameMode());
+        check(GameMode != nullptr);
+        FString ErrorMessage;
+        GameMode->InitGame(
+            TEXT("MainLevel"), TEXT("?Stage4Slide=west"), ErrorMessage);
+        AddExpectedError(
+            TEXT("Stage4SetupFailure"),
+            EAutomationExpectedErrorFlags::Contains,
+            1);
+        Fixture.World->BeginPlay();
+        TestEqual(TEXT("invalid BeginPlay logs setup failure once"),
+            FShipNavigationGameModeTestAccessor::SetupFailureLogCount(
+                *GameMode),
+            1);
+        TestNull(TEXT("invalid BeginPlay spawns no builder"),
+            GameMode->GetCourseBuilder());
+        TestNull(TEXT("invalid BeginPlay spawns no ship"),
+            GameMode->GetRunShip());
+    }
+
+    {
+        FScopedCourseTestWorld Fixture;
+        Fixture.AddPlayer();
+        ASimGameMode* GameMode =
+            Cast<ASimGameMode>(Fixture.World->GetAuthGameMode());
+        check(GameMode != nullptr);
+        FString ErrorMessage;
+        GameMode->InitGame(
+            TEXT("MainLevel"), TEXT("?Stage4Slide=0"), ErrorMessage);
+        FShipNavigationGameModeTestAccessor::SetWaterSurfaceOverride(
+            *GameMode, 75.0);
+        Fixture.World->BeginPlay();
+        TestEqual(TEXT("valid BeginPlay has no setup failure"),
+            GameMode->GetSetupFailure(), EShipSetupFailure::None);
+        TestNotNull(TEXT("valid BeginPlay creates builder"),
+            GameMode->GetCourseBuilder());
+        TestNotNull(TEXT("valid BeginPlay creates ship"),
+            GameMode->GetRunShip());
+        TestTrue(TEXT("valid BeginPlay possesses run ship"),
+            Fixture.Controller->GetPawn() == GameMode->GetRunShip());
+        TestEqual(TEXT("EnterAutonomy called once before first GameMode tick"),
+            FShipNavigationGameModeTestAccessor::EnterAutonomyCallCount(
+                *GameMode),
+            1);
+        TestTrue(TEXT("Navigator enabled before BeginPlay returns"),
+            GameMode->GetRunShip() != nullptr
+            && GameMode->GetRunShip()->GetNavigator() != nullptr
+            && GameMode->GetRunShip()->GetNavigator()->IsNavigationEnabled());
+        TestEqual(TEXT("forced slide resolved"),
+            GameMode->GetResolvedSlideCm(), 0.0);
+        TestEqual(TEXT("elapsed starts at zero"),
+            GameMode->GetElapsedRunSeconds(), 0.0);
+    }
+    return !HasAnyErrors();
+}
+
+bool FShipGameModeTerminalRuntimeErrorTest::RunTest(const FString&)
+{
+    {
+        FScopedCourseTestWorld Fixture;
+        ASimGameMode* GameMode =
+            Cast<ASimGameMode>(Fixture.World->GetAuthGameMode());
+        check(GameMode != nullptr);
+
+        FShipNavigationGameModeTestAccessor::ResetTerminalState(*GameMode);
+        FShipNavigationGameModeTestAccessor::ApplyTerminalInputs(
+            *GameMode, true, true, true);
+        TestEqual(TEXT("collision wins same-tick priority"),
+            GameMode->GetRunResult(), EShipRunResult::Collision);
+        FShipNavigationGameModeTestAccessor::ApplyTerminalInputs(
+            *GameMode, false, true, false);
+        TestEqual(TEXT("terminal result cannot be overwritten"),
+            GameMode->GetRunResult(), EShipRunResult::Collision);
+        TestEqual(TEXT("terminal result logs once"),
+            FShipNavigationGameModeTestAccessor::TerminalLogCount(*GameMode),
+            1);
+
+        FShipNavigationGameModeTestAccessor::ResetTerminalState(*GameMode);
+        FShipNavigationGameModeTestAccessor::ApplyTerminalInputs(
+            *GameMode, false, true, true);
+        TestEqual(TEXT("success wins timeout"),
+            GameMode->GetRunResult(), EShipRunResult::Success);
+
+        FShipNavigationGameModeTestAccessor::ResetTerminalState(*GameMode);
+        FShipNavigationGameModeTestAccessor::ApplyTerminalInputs(
+            *GameMode, false, false, true);
+        TestEqual(TEXT("timeout latches without higher priority"),
+            GameMode->GetRunResult(), EShipRunResult::Timeout);
+    }
+
+    {
+        FScopedCourseTestWorld Fixture;
+        Fixture.AddPlayer();
+        ASimGameMode* GameMode =
+            Cast<ASimGameMode>(Fixture.World->GetAuthGameMode());
+        check(GameMode != nullptr);
+        FString ErrorMessage;
+        GameMode->InitGame(
+            TEXT("MainLevel"), TEXT("?Stage4Slide=0"), ErrorMessage);
+        FShipNavigationGameModeTestAccessor::SetWaterSurfaceOverride(
+            *GameMode, 75.0);
+        Fixture.World->BeginPlay();
+        AShipPawn* RunShip = GameMode->GetRunShip();
+        TestNotNull(TEXT("runtime error fixture has ship"), RunShip);
+        UShipNavigator* Navigator =
+            RunShip != nullptr ? RunShip->GetNavigator() : nullptr;
+        TestNotNull(TEXT("runtime error fixture has Navigator"), Navigator);
+        if (Navigator == nullptr)
+        {
+            return false;
+        }
+        FShipNavigatorTestAccessor::Tick(*Navigator, 1.0f / 60.0f);
+        AddExpectedError(
+            TEXT("Stage4RuntimeCalculationError"),
+            EAutomationExpectedErrorFlags::Contains,
+            1);
+        GameMode->ReportRuntimeCalculationError(
+            EShipRuntimeCalculationError::InvalidHeading);
+        GameMode->ReportRuntimeCalculationError(
+            EShipRuntimeCalculationError::InvalidThrottle);
+        TestTrue(TEXT("runtime error remains latched"),
+            GameMode->HasRuntimeCalculationError());
+        TestEqual(TEXT("first runtime error is preserved"),
+            GameMode->GetRuntimeCalculationError(),
+            EShipRuntimeCalculationError::InvalidHeading);
+        TestEqual(TEXT("every runtime report is counted"),
+            GameMode->GetRuntimeCalculationErrorCount(), 2);
+        TestEqual(TEXT("runtime error marker logs once"),
+            FShipNavigationGameModeTestAccessor::RuntimeErrorLogCount(
+                *GameMode),
+            1);
+        TestFalse(TEXT("runtime error disables Navigator"),
+            Navigator->IsNavigationEnabled());
+        TestTrue(TEXT("runtime error zeros throttle command"),
+            FMath::IsNearlyZero(
+                FShipNavigatorTestAccessor::LastThrottleCommand(*Navigator),
+                1e-6f));
+        TestTrue(TEXT("runtime error zeros steer command"),
+            FMath::IsNearlyZero(
+                FShipNavigatorTestAccessor::LastSteerCommand(*Navigator),
+                1e-6f));
+        FShipNavigationGameModeTestAccessor::ApplyTerminalInputs(
+            *GameMode, false, true, false);
+        TestEqual(TEXT("runtime error permanently blocks success"),
+            GameMode->GetRunResult(), EShipRunResult::Running);
+        FShipNavigationGameModeTestAccessor::ApplyTerminalInputs(
+            *GameMode, false, true, true);
+        TestEqual(TEXT("runtime error still permits timeout"),
+            GameMode->GetRunResult(), EShipRunResult::Timeout);
+    }
     return !HasAnyErrors();
 }
 

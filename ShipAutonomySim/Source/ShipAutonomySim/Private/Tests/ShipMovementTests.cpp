@@ -1160,6 +1160,30 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     "ShipAutonomySim.ShipNavigation.Unit.Pawn.AutoStartRemovesManualMapping",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+struct FSimGameModeTestAccessor
+{
+    static void SetSkipStage4Orchestration(
+        ASimGameMode& GameMode,
+        bool bSkip)
+    {
+        GameMode.bTestSkipStage4Orchestration = bSkip;
+    }
+    static void SetWaterSurfaceOverride(
+        ASimGameMode& GameMode,
+        double WaterSurfaceZCm)
+    {
+        GameMode.TestWaterSurfaceOverrideCm = WaterSurfaceZCm;
+    }
+    static int32 BeginPlayInvocationCount(const ASimGameMode& GameMode)
+    {
+        return GameMode.TestBeginPlayInvocationCount;
+    }
+    static int32 EnterAutonomyCallCount(const ASimGameMode& GameMode)
+    {
+        return GameMode.TestEnterAutonomyCallCount;
+    }
+};
+
 class FScopedShipInputWorld
 {
 public:
@@ -1176,6 +1200,11 @@ public:
         GameInstance->InitializeStandalone(WorldName, GetTransientPackage());
         World = GameInstance->GetWorld();
         check(World != nullptr && World->SetGameMode(FURL()));
+        ASimGameMode* GameMode =
+            Cast<ASimGameMode>(World->GetAuthGameMode());
+        check(GameMode != nullptr);
+        FSimGameModeTestAccessor::SetSkipStage4Orchestration(
+            *GameMode, true);
 
         LocalPlayer = NewObject<ULocalPlayer>(GEngine, GEngine->LocalPlayerClass);
         check(GameInstance->AddLocalPlayer(LocalPlayer, 0) == 0);
@@ -1716,22 +1745,9 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     "ShipAutonomySim.ShipMovement.GameMode.Bootstrap",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
-struct FSimGameModeTestAccessor
-{
-    static void EnsureTestShipForFirstPlayer(ASimGameMode& GameMode)
-    {
-        GameMode.EnsureTestShipForFirstPlayer();
-    }
-    static int32 BeginPlayInvocationCount(const ASimGameMode& GameMode)
-    {
-        return GameMode.TestBeginPlayInvocationCount;
-    }
-};
-
 bool FSimGameModeBootstrapTest::RunTest(const FString&)
 {
     FScopedShipInputWorld Input;
-    Input.StartPlay();
     ASimGameMode* GameMode =
         Cast<ASimGameMode>(Input.World->GetAuthGameMode());
     TestNotNull(TEXT("project GameMode exists"), GameMode);
@@ -1739,6 +1755,9 @@ bool FSimGameModeBootstrapTest::RunTest(const FString&)
     {
         return false;
     }
+    FSimGameModeTestAccessor::SetSkipStage4Orchestration(*GameMode, false);
+    FSimGameModeTestAccessor::SetWaterSurfaceOverride(*GameMode, 75.0);
+    Input.StartPlay();
     TestTrue(TEXT("GameMode used normal BeginPlay lifecycle"),
         GameMode->HasActorBegunPlay());
     TestEqual(TEXT("GameMode BeginPlay ran exactly once"),
@@ -1762,22 +1781,29 @@ bool FSimGameModeBootstrapTest::RunTest(const FString&)
     {
         TestNotNull(TEXT("possessed ship has Enhanced input component"),
             Cast<UEnhancedInputComponent>(PossessedShip->InputComponent));
-        TestTrue(TEXT("manual context registered"),
+        TestFalse(TEXT("product bootstrap removes manual context"),
             Input.Subsystem->HasMappingContext(
                 &FShipPawnTestAccessor::Mapping(*PossessedShip)));
+        TestFalse(TEXT("product bootstrap keeps manual mapping inactive"),
+            FShipPawnTestAccessor::ManualMappingRegistered(*PossessedShip));
+        TestFalse(TEXT("product bootstrap keeps manual input inactive"),
+            FShipPawnTestAccessor::ManualInputActive(*PossessedShip));
+        UShipMovement& Movement =
+            FShipPawnTestAccessor::Movement(*PossessedShip);
+        TestTrue(TEXT("product bootstrap starts with zero throttle"),
+            FMath::IsNearlyZero(
+                FShipMovementTestAccessor::Throttle(Movement), 1e-6));
+        TestTrue(TEXT("product bootstrap starts with zero steer"),
+            FMath::IsNearlyZero(
+                FShipMovementTestAccessor::Steer(Movement), 1e-6));
+        TestTrue(TEXT("product bootstrap enables Navigator"),
+            PossessedShip->GetNavigator() != nullptr
+            && PossessedShip->GetNavigator()->IsNavigationEnabled());
     }
-    FSimGameModeTestAccessor::EnsureTestShipForFirstPlayer(*GameMode);
-    FSimGameModeTestAccessor::EnsureTestShipForFirstPlayer(*GameMode);
-    Ships.Reset();
-    UGameplayStatics::GetAllActorsOfClass(
-        Input.World,
-        AShipPawn::StaticClass(),
-        Ships);
-    TestEqual(TEXT("helper remains idempotent"), Ships.Num(), 1);
-    TestTrue(TEXT("same ship remains possessed"),
-        Input.Controller->GetPawn() == PossessedShip);
-    TestEqual(TEXT("helper does not redispatch BeginPlay"),
-        FSimGameModeTestAccessor::BeginPlayInvocationCount(*GameMode), 1);
+    TestEqual(TEXT("product bootstrap calls EnterAutonomy once"),
+        FSimGameModeTestAccessor::EnterAutonomyCallCount(*GameMode), 1);
+    TestEqual(TEXT("product bootstrap has no setup failure"),
+        GameMode->GetSetupFailure(), EShipSetupFailure::None);
     return true;
 }
 
