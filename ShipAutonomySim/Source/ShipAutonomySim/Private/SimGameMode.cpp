@@ -3,12 +3,28 @@
 #include "ShipPawn.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
+#include "ShipNavigationSimulation.h"
+
+DEFINE_LOG_CATEGORY_STATIC(LogSimGameMode, Log, All);
 
 ASimGameMode::ASimGameMode()
 {
 	DefaultPawnClass = nullptr;
 	ShipPawnClass = AShipPawn::StaticClass();
 	TestShipSpawnTransform = FTransform(FRotator::ZeroRotator, FVector::ZeroVector);
+}
+
+void ASimGameMode::ReportRuntimeCalculationError(
+    EShipRuntimeCalculationError Error)
+{
+    if (LatchRuntimeCalculationError(Error, RuntimeErrorState))
+    {
+        UE_LOG(
+            LogSimGameMode,
+            Error,
+            TEXT("Stage4RuntimeCalculationError error=%d"),
+            static_cast<int32>(Error));
+    }
 }
 
 void ASimGameMode::BeginPlay()

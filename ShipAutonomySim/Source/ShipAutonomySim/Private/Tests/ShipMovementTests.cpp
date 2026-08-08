@@ -10,6 +10,7 @@
 #include "Engine/GameInstance.h"
 #include "Engine/HitResult.h"
 #include "Engine/LocalPlayer.h"
+#include "Engine/StaticMeshActor.h"
 #include "Engine/World.h"
 #include "EnhancedActionKeyMapping.h"
 #include "EnhancedInputComponent.h"
@@ -30,6 +31,7 @@
 #include "Misc/Paths.h"
 #include "ShipMovement.h"
 #include "ShipMovementSimulation.h"
+#include "ShipNavigator.h"
 #include "ShipPawn.h"
 #include "SimGameMode.h"
 
@@ -1153,6 +1155,11 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     "ShipAutonomySim.ShipNavigation.Unit.Pawn.DirectManualInputIgnoredDuringAutonomy",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipPawnAutoStartRemovesManualMappingTest,
+    "ShipAutonomySim.ShipNavigation.Unit.Pawn.AutoStartRemovesManualMapping",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
 class FScopedShipInputWorld
 {
 public:
@@ -1271,6 +1278,18 @@ struct FShipPawnTestAccessor
     static int32 MappingRemovalCount(const AShipPawn& Pawn)
     {
         return Pawn.TestManualMappingRemovalCount;
+    }
+    static bool ManualMappingRegistered(const AShipPawn& Pawn)
+    {
+        return Pawn.bManualMappingRegistered;
+    }
+    static bool ManualInputActive(const AShipPawn& Pawn)
+    {
+        return Pawn.bManualInputActive;
+    }
+    static bool AutonomyInputLocked(const AShipPawn& Pawn)
+    {
+        return Pawn.bAutonomyInputLocked;
     }
     static int32 ThrottleCompletedCount(const AShipPawn& Pawn)
     {
@@ -1411,6 +1430,88 @@ bool FShipPawnDirectManualInputIgnoredDuringAutonomyTest::RunTest(
             FShipMovementTestAccessor::Steer(Movement), -0.3, 1e-6));
     TestTrue(TEXT("direct handlers do not move pawn"),
         Pawn.GetActorTransform().Equals(TransformBefore));
+    return !HasAnyErrors();
+}
+
+bool FShipPawnAutoStartRemovesManualMappingTest::RunTest(const FString&)
+{
+    const TArray<FVector> ValidPath{
+        FVector(0.0, 0.0, 0.0),
+        FVector(1000.0, -750.0, 0.0),
+        FVector(2000.0, 0.0, 0.0)};
+    {
+        FScopedShipInputWorld Input;
+        AShipPawn& Pawn = Input.PossessShip();
+        UShipMovement& Movement = FShipPawnTestAccessor::Movement(Pawn);
+        AStaticMeshActor* Wall = Input.World->SpawnActor<AStaticMeshActor>();
+        ASimGameMode* RunOwner =
+            Cast<ASimGameMode>(Input.World->GetAuthGameMode());
+        TestNotNull(TEXT("autonomy wall spawned"), Wall);
+        TestNotNull(TEXT("autonomy run owner exists"), RunOwner);
+        Input.Press(EKeys::W);
+        Input.Press(EKeys::A);
+        TestTrue(TEXT("manual mapping starts registered"),
+            FShipPawnTestAccessor::ManualMappingRegistered(Pawn));
+        TestTrue(TEXT("manual input starts active"),
+            FShipPawnTestAccessor::ManualInputActive(Pawn));
+        TestTrue(TEXT("manual throttle starts non-zero"),
+            FShipMovementTestAccessor::Throttle(Movement) > 0.99);
+        TestTrue(TEXT("manual steer starts non-zero"),
+            FShipMovementTestAccessor::Steer(Movement) < -0.99);
+
+        TestTrue(TEXT("EnterAutonomy succeeds in one call"),
+            Pawn.EnterAutonomy(ValidPath, Wall, RunOwner));
+        TestTrue(TEXT("autonomy latch is permanent"),
+            FShipPawnTestAccessor::AutonomyInputLocked(Pawn));
+        TestFalse(TEXT("manual input is inactive"),
+            FShipPawnTestAccessor::ManualInputActive(Pawn));
+        TestFalse(TEXT("manual mapping state is cleared"),
+            FShipPawnTestAccessor::ManualMappingRegistered(Pawn));
+        TestFalse(TEXT("manual context is removed"),
+            Input.Subsystem->HasMappingContext(
+                &FShipPawnTestAccessor::Mapping(Pawn)));
+        TestEqual(TEXT("manual mapping removed once"),
+            FShipPawnTestAccessor::MappingRemovalCount(Pawn), 1);
+        TestTrue(TEXT("transition zeros throttle before first tick"),
+            FMath::IsNearlyZero(
+                FShipMovementTestAccessor::Throttle(Movement), 1e-6));
+        TestTrue(TEXT("transition zeros steer before first tick"),
+            FMath::IsNearlyZero(
+                FShipMovementTestAccessor::Steer(Movement), 1e-6));
+        TestNotNull(TEXT("Navigator component exists"), Pawn.GetNavigator());
+        TestTrue(TEXT("Navigator enabled after successful configure"),
+            Pawn.GetNavigator() != nullptr
+            && Pawn.GetNavigator()->IsNavigationEnabled());
+    }
+    {
+        FScopedShipInputWorld Input;
+        AShipPawn& Pawn = Input.PossessShip();
+        UShipMovement& Movement = FShipPawnTestAccessor::Movement(Pawn);
+        AStaticMeshActor* Wall = Input.World->SpawnActor<AStaticMeshActor>();
+        ASimGameMode* RunOwner =
+            Cast<ASimGameMode>(Input.World->GetAuthGameMode());
+        Input.Press(EKeys::W);
+        Input.Press(EKeys::D);
+        const TArray<FVector> InvalidPath{ValidPath[0], ValidPath[1]};
+        TestFalse(TEXT("invalid path activation fails"),
+            Pawn.EnterAutonomy(InvalidPath, Wall, RunOwner));
+        TestTrue(TEXT("failed activation keeps autonomy latch"),
+            FShipPawnTestAccessor::AutonomyInputLocked(Pawn));
+        TestFalse(TEXT("failed activation keeps manual inactive"),
+            FShipPawnTestAccessor::ManualInputActive(Pawn));
+        TestFalse(TEXT("failed activation keeps mapping removed"),
+            Input.Subsystem->HasMappingContext(
+                &FShipPawnTestAccessor::Mapping(Pawn)));
+        TestTrue(TEXT("failed activation keeps throttle zero"),
+            FMath::IsNearlyZero(
+                FShipMovementTestAccessor::Throttle(Movement), 1e-6));
+        TestTrue(TEXT("failed activation keeps steer zero"),
+            FMath::IsNearlyZero(
+                FShipMovementTestAccessor::Steer(Movement), 1e-6));
+        TestTrue(TEXT("failed activation leaves Navigator disabled"),
+            Pawn.GetNavigator() != nullptr
+            && !Pawn.GetNavigator()->IsNavigationEnabled());
+    }
     return !HasAnyErrors();
 }
 

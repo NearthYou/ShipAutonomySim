@@ -5,11 +5,14 @@
 #include "ShipPawn.generated.h"
 
 class UBoxComponent;
+class ASimGameMode;
+class AStaticMeshActor;
 class UCameraComponent;
 class UEnhancedInputLocalPlayerSubsystem;
 class UInputAction;
 class UInputMappingContext;
 class UShipMovement;
+class UShipNavigator;
 class USpringArmComponent;
 class UStaticMeshComponent;
 struct FInputActionValue;
@@ -26,6 +29,11 @@ public:
     virtual void UnPossessed() override;
     virtual void EndPlay(
         const EEndPlayReason::Type EndPlayReason) override;
+    bool EnterAutonomy(
+        const TArray<FVector>& WorldPath,
+        AStaticMeshActor* ActualWall,
+        ASimGameMode* RunOwner);
+    UShipNavigator* GetNavigator() const;
 
 protected:
     virtual void BeginPlay() override;
@@ -39,6 +47,9 @@ private:
 
     UPROPERTY(VisibleAnywhere, Category=Ship)
     TObjectPtr<UShipMovement> ShipMovement;
+
+    UPROPERTY(VisibleAnywhere, Category=Autonomy)
+    TObjectPtr<UShipNavigator> Navigator;
 
     UPROPERTY(VisibleAnywhere, Category=Camera)
     TObjectPtr<USpringArmComponent> CameraBoom;

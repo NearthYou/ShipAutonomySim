@@ -14,6 +14,7 @@
 #include "InputMappingContext.h"
 #include "InputModifiers.h"
 #include "ShipMovement.h"
+#include "ShipNavigator.h"
 #include "UObject/ConstructorHelpers.h"
 
 AShipPawn::AShipPawn()
@@ -51,6 +52,8 @@ AShipPawn::AShipPawn()
 
     ShipMovement =
         CreateDefaultSubobject<UShipMovement>(TEXT("ShipMovement"));
+    Navigator =
+        CreateDefaultSubobject<UShipNavigator>(TEXT("ShipNavigator"));
     CameraBoom =
         CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
     CameraBoom->SetupAttachment(CollisionRoot);
@@ -192,6 +195,40 @@ void AShipPawn::LockManualInputForAutonomy()
         ShipMovement->SetThrottle(0.0f);
         ShipMovement->SetSteer(0.0f);
     }
+}
+
+bool AShipPawn::EnterAutonomy(
+    const TArray<FVector>& WorldPath,
+    AStaticMeshActor* ActualWall,
+    ASimGameMode* RunOwner)
+{
+    LockManualInputForAutonomy();
+    if (ShipMovement == nullptr
+        || Navigator == nullptr
+        || ActualWall == nullptr
+        || RunOwner == nullptr)
+    {
+        return false;
+    }
+    if (!Navigator->Configure(WorldPath, ShipMovement, ActualWall, RunOwner))
+    {
+        ShipMovement->SetThrottle(0.0f);
+        ShipMovement->SetSteer(0.0f);
+        return false;
+    }
+    Navigator->SetNavigationEnabled(true);
+    if (!Navigator->IsNavigationEnabled())
+    {
+        ShipMovement->SetThrottle(0.0f);
+        ShipMovement->SetSteer(0.0f);
+        return false;
+    }
+    return true;
+}
+
+UShipNavigator* AShipPawn::GetNavigator() const
+{
+    return Navigator.Get();
 }
 
 void AShipPawn::HandleThrottle(const FInputActionValue& Value)

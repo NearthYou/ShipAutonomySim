@@ -2,6 +2,7 @@
 #include <limits>
 
 #include "Components/StaticMeshComponent.h"
+#include "Components/SceneComponent.h"
 #include "CourseBuilder.h"
 #include "Engine/Engine.h"
 #include "Engine/GameInstance.h"
@@ -12,7 +13,10 @@
 #include "Misc/AutomationTest.h"
 #include "ShipNavigationSimulation.h"
 #include "ShipNavigationTypes.h"
+#include "ShipMovement.h"
 #include "ShipMovementSimulation.h"
+#include "ShipNavigator.h"
+#include "SimGameMode.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     FStage4SlideOptionClassificationTest,
@@ -91,6 +95,95 @@ struct FCourseBuilderTestAccessor
     {
         Builder.TestWaterSurfaceOverrideCm = WaterSurfaceZCm;
     }
+};
+
+struct FShipNavigatorTestAccessor
+{
+    static void Tick(UShipNavigator& Navigator, float DeltaTime)
+    {
+        Navigator.TickComponent(DeltaTime, LEVELTICK_All, nullptr);
+    }
+
+    static void SetShipLocationOverride(
+        UShipNavigator& Navigator,
+        const FVector& Location)
+    {
+        Navigator.TestShipLocationOverride = Location;
+    }
+
+    static void SetForwardSpeedOverride(
+        UShipNavigator& Navigator,
+        double SpeedCmPerSecond)
+    {
+        Navigator.TestForwardSpeedOverride = SpeedCmPerSecond;
+    }
+
+    static void CorruptPath(UShipNavigator& Navigator)
+    {
+        Navigator.WorldPath.Reset();
+    }
+
+    static const FShipPathProgress& Progress(const UShipNavigator& Navigator)
+    {
+        return Navigator.Progress;
+    }
+
+    static bool CoastLatched(const UShipNavigator& Navigator)
+    {
+        return Navigator.bCoastLatched;
+    }
+
+    static float LastThrottleCommand(const UShipNavigator& Navigator)
+    {
+        return Navigator.TestLastThrottleCommand;
+    }
+
+    static float LastSteerCommand(const UShipNavigator& Navigator)
+    {
+        return Navigator.TestLastSteerCommand;
+    }
+};
+
+struct FShipNavigationGameModeTestAccessor
+{
+    static const FShipRuntimeErrorState& RuntimeErrorState(
+        const ASimGameMode& GameMode)
+    {
+        return GameMode.RuntimeErrorState;
+    }
+};
+
+class FNavigatorTestFixture
+{
+public:
+    FNavigatorTestFixture()
+    {
+        Owner = World.World->SpawnActor<AActor>();
+        check(Owner != nullptr);
+        USceneComponent* Root = NewObject<USceneComponent>(Owner);
+        Owner->SetRootComponent(Root);
+        Owner->AddInstanceComponent(Root);
+        Root->RegisterComponent();
+
+        Movement = NewObject<UShipMovement>(Owner, TEXT("TestShipMovement"));
+        Navigator = NewObject<UShipNavigator>(Owner, TEXT("TestShipNavigator"));
+        Owner->AddInstanceComponent(Movement);
+        Owner->AddInstanceComponent(Navigator);
+        Movement->RegisterComponent();
+        Navigator->RegisterComponent();
+
+        Wall = World.World->SpawnActor<AStaticMeshActor>();
+        RunOwner = Cast<ASimGameMode>(World.World->GetAuthGameMode());
+        check(Movement != nullptr && Navigator != nullptr);
+        check(Wall != nullptr && RunOwner != nullptr);
+    }
+
+    FScopedCourseTestWorld World;
+    AActor* Owner = nullptr;
+    UShipMovement* Movement = nullptr;
+    UShipNavigator* Navigator = nullptr;
+    AStaticMeshActor* Wall = nullptr;
+    ASimGameMode* RunOwner = nullptr;
 };
 
 bool FStage4SlideOptionClassificationTest::RunTest(const FString&)
@@ -444,6 +537,183 @@ bool FShipCourseRuntimeSetupFailureTest::RunTest(const FString&)
         ForcedBuilder->GetWallActor() == ForcedResult.WallActor);
 
     ForcedBuilder->ClearForcedSlide();
+    return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipNavigatorControlCoastAndErrorTest,
+    "ShipAutonomySim.ShipNavigation.Unit.Navigator.ControlCoastAndError",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FShipNavigatorControlCoastAndErrorTest::RunTest(const FString&)
+{
+    const TArray<FVector> Path{
+        FVector(0.0, 0.0, 0.0),
+        FVector(1000.0, 0.0, 0.0),
+        FVector(2000.0, 0.0, 0.0)};
+
+    {
+        FNavigatorTestFixture Fixture;
+        Fixture.Navigator->SetNavigationEnabled(true);
+        TestFalse(TEXT("enable before configure is rejected"),
+            Fixture.Navigator->IsNavigationEnabled());
+        TestFalse(TEXT("invalid path configure rejected"),
+            Fixture.Navigator->Configure(
+                TArray<FVector>{Path[0], Path[1]},
+                Fixture.Movement,
+                Fixture.Wall,
+                Fixture.RunOwner));
+        TestTrue(TEXT("valid three point configure succeeds"),
+            Fixture.Navigator->Configure(
+                Path,
+                Fixture.Movement,
+                Fixture.Wall,
+                Fixture.RunOwner));
+        TestFalse(TEXT("configure alone does not enable navigation"),
+            Fixture.Navigator->IsNavigationEnabled());
+
+        bool bNavigatorPrerequisiteFound = false;
+        for (const FTickPrerequisite& Prerequisite :
+            Fixture.Movement->PrimaryComponentTick.GetPrerequisites())
+        {
+            bNavigatorPrerequisiteFound = bNavigatorPrerequisiteFound
+                || Prerequisite.PrerequisiteObject.Get() == Fixture.Navigator;
+        }
+        TestTrue(TEXT("Movement waits for Navigator tick"),
+            bNavigatorPrerequisiteFound);
+
+        Fixture.Navigator->SetNavigationEnabled(true);
+        TestTrue(TEXT("configured Navigator can enable"),
+            Fixture.Navigator->IsNavigationEnabled());
+        const FTransform TransformBefore = Fixture.Owner->GetActorTransform();
+        FShipNavigatorTestAccessor::Tick(*Fixture.Navigator, 1.0f / 60.0f);
+        TestTrue(TEXT("straight path commands full throttle"),
+            FMath::IsNearlyEqual(
+                FShipNavigatorTestAccessor::LastThrottleCommand(
+                    *Fixture.Navigator),
+                1.0f,
+                1e-6f));
+        TestTrue(TEXT("straight path commands zero steer"),
+            FMath::IsNearlyEqual(
+                FShipNavigatorTestAccessor::LastSteerCommand(
+                    *Fixture.Navigator),
+                0.0f,
+                1e-6f));
+        TestTrue(TEXT("Navigator never mutates owner transform"),
+            Fixture.Owner->GetActorTransform().Equals(TransformBefore));
+
+        FShipNavigatorTestAccessor::SetForwardSpeedOverride(
+            *Fixture.Navigator, 100.0);
+        FShipNavigatorTestAccessor::SetShipLocationOverride(
+            *Fixture.Navigator, FVector(1000.0, 0.0, 0.0));
+        FShipNavigatorTestAccessor::Tick(*Fixture.Navigator, 1.0f / 60.0f);
+        TestEqual(TEXT("progress enters final segment"),
+            FShipNavigatorTestAccessor::Progress(*Fixture.Navigator)
+                .ActiveSegmentIndex,
+            1);
+        FShipNavigatorTestAccessor::SetShipLocationOverride(
+            *Fixture.Navigator, FVector(1990.0, 0.0, 0.0));
+        FShipNavigatorTestAccessor::Tick(*Fixture.Navigator, 1.0f / 60.0f);
+        TestTrue(TEXT("coast latches near endpoint"),
+            FShipNavigatorTestAccessor::CoastLatched(*Fixture.Navigator));
+        TestTrue(TEXT("coast commands zero throttle"),
+            FMath::IsNearlyZero(
+                FShipNavigatorTestAccessor::LastThrottleCommand(
+                    *Fixture.Navigator),
+                1e-6f));
+        FShipNavigatorTestAccessor::SetShipLocationOverride(
+            *Fixture.Navigator, FVector(1200.0, 0.0, 0.0));
+        FShipNavigatorTestAccessor::Tick(*Fixture.Navigator, 1.0f / 60.0f);
+        TestTrue(TEXT("coast does not resume throttle"),
+            FMath::IsNearlyZero(
+                FShipNavigatorTestAccessor::LastThrottleCommand(
+                    *Fixture.Navigator),
+                1e-6f));
+        TestTrue(TEXT("coast throttle stays non-negative"),
+            FShipNavigatorTestAccessor::LastThrottleCommand(
+                *Fixture.Navigator) >= 0.0f);
+    }
+
+    const auto VerifyRuntimeError = [this, &Path](
+        const TCHAR* Label,
+        int32 CaseIndex,
+        EShipRuntimeCalculationError ExpectedError)
+    {
+        FNavigatorTestFixture Fixture;
+        TestTrue(*FString::Printf(TEXT("%s configure"), Label),
+            Fixture.Navigator->Configure(
+                Path,
+                Fixture.Movement,
+                Fixture.Wall,
+                Fixture.RunOwner));
+        Fixture.Navigator->SetNavigationEnabled(true);
+        Fixture.Movement->SetThrottle(0.8f);
+        Fixture.Movement->SetSteer(-0.4f);
+        if (CaseIndex == 0)
+        {
+            FShipNavigatorTestAccessor::CorruptPath(*Fixture.Navigator);
+        }
+        else if (CaseIndex == 1)
+        {
+            FShipNavigatorTestAccessor::SetShipLocationOverride(
+                *Fixture.Navigator,
+                FVector(
+                    std::numeric_limits<double>::quiet_NaN(),
+                    0.0,
+                    0.0));
+        }
+        else
+        {
+            FShipNavigatorTestAccessor::SetShipLocationOverride(
+                *Fixture.Navigator,
+                FVector(1000.0, 0.0, 0.0));
+            FShipNavigatorTestAccessor::SetForwardSpeedOverride(
+                *Fixture.Navigator,
+                std::numeric_limits<double>::quiet_NaN());
+        }
+
+        AddExpectedError(
+            TEXT("Stage4RuntimeCalculationError"),
+            EAutomationExpectedErrorFlags::Contains,
+            1);
+        FShipNavigatorTestAccessor::Tick(*Fixture.Navigator, 1.0f / 60.0f);
+        const FShipRuntimeErrorState& RuntimeState =
+            FShipNavigationGameModeTestAccessor::RuntimeErrorState(
+                *Fixture.RunOwner);
+        TestTrue(*FString::Printf(TEXT("%s error latched"), Label),
+            RuntimeState.bLatched);
+        TestEqual(*FString::Printf(TEXT("%s first error"), Label),
+            RuntimeState.FirstError,
+            ExpectedError);
+        TestEqual(*FString::Printf(TEXT("%s report count"), Label),
+            RuntimeState.ReportCount,
+            1);
+        TestFalse(*FString::Printf(TEXT("%s disables Navigator"), Label),
+            Fixture.Navigator->IsNavigationEnabled());
+        TestTrue(*FString::Printf(TEXT("%s zeros throttle"), Label),
+            FMath::IsNearlyZero(
+                FShipNavigatorTestAccessor::LastThrottleCommand(
+                    *Fixture.Navigator),
+                1e-6f));
+        TestTrue(*FString::Printf(TEXT("%s zeros steer"), Label),
+            FMath::IsNearlyZero(
+                FShipNavigatorTestAccessor::LastSteerCommand(
+                    *Fixture.Navigator),
+                1e-6f));
+    };
+
+    VerifyRuntimeError(
+        TEXT("invalid path"),
+        0,
+        EShipRuntimeCalculationError::InvalidNavigationPath);
+    VerifyRuntimeError(
+        TEXT("non-finite location"),
+        1,
+        EShipRuntimeCalculationError::InvalidProgressProjection);
+    VerifyRuntimeError(
+        TEXT("stopping distance"),
+        2,
+        EShipRuntimeCalculationError::InvalidStoppingDistance);
     return !HasAnyErrors();
 }
 
