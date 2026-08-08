@@ -37,7 +37,7 @@ Stage 5는 위 계약 위에 관측과 저장만 추가한다. 항법 입력, �
 - 컬러와 깊이를 같은 frame index, 같은 논리 capture instant와 같은 선박 transform에 묶는다.
 - SceneDepth의 실수 view-Z 거리를 0 cm에서 5000 cm 사이로 clip하고 웹 뷰어의 가까울수록 밝고 따뜻한 계약에 맞게 8비트로 역선형 정규화한다.
 - 실행마다 `Saved/ShipCaptures` 아래에 충돌하지 않는 폴더를 만들고, 완전하게 저장된 frame pair만 manifest에 넣는다.
-- Success, Collision, Timeout, runtime 오류, capture 오류와 PIE 종료에서 finalize를 한 번만 수행한다.
+- runtime calculation error와 capture runtime error는 각각 실패 상태로 latch하되 그 시점에 새 terminal을 만들거나 즉시 finalize하지 않는다. 기존 Stage 4 terminal 또는 EndPlay에 도달했을 때만 실패 manifest를 정확히 한 번 finalize한다.
 - 기존 TypeScript 웹 뷰어가 소스 변경 없이 manifest와 프레임을 읽고 재생하게 한다.
 - 동기 구현의 영향은 저장 켬과 끔의 동일 조건 A/B로 측정하되, 결과가 나빠도 별도 승인 없이 비동기 writer나 해상도 변경을 적용하지 않는다.
 
@@ -68,11 +68,11 @@ Stage 5는 위 계약 위에 관측과 저장만 추가한다. 항법 입력, �
 
 render 호출 수를 줄일 가능성은 있지만 최종 LDR 컬러, 고정 노출과 SceneDepth 정밀도를 한 출력 계약에 섞는다. 과제의 컬러용과 깊이용 SceneCapture 두 개 요구에도 직접 맞지 않고 custom material과 변환 검증이 늘어난다. 선택하지 않는다.
 
-### 접근법 C: `PF_R32_FLOAT`와 직접 RHI 또는 비동기 readback
+### 접근법 C: 직접 RHI 또는 비동기 readback
 
-단일 채널 32비트 target과 staging texture 또는 GPU readback을 사용하면 깊이 target 메모리와 game-thread stall을 줄일 수 있다. PNG writer도 별도 thread로 옮길 수 있다.
+staging texture나 GPU readback을 직접 관리하면 game-thread stall을 줄일 가능성이 있고 PNG writer도 별도 thread로 옮길 수 있다.
 
-로컬 UE 5.5.4의 공개 `ReadLinearColorPixels` 변환 목록에는 `PF_R32_FLOAT`가 없고, 직접 RHI readback은 수명, 동기화와 platform 분기를 추가한다. 비동기 writer 역시 이번 승인 범위 밖이다. 측정 결과의 후속 대안으로만 남기고 선택하지 않는다.
+그러나 로컬 UE 5.5.4는 단일 채널 `PF_R32_FLOAT`를 공개 `ReadLinearColorPixels` 경로에서 이미 지원한다. 직접 RHI는 수명, 동기화와 platform 분기를 추가하고 비동기 writer도 이번 승인 범위 밖이므로, 측정 결과의 후속 대안으로만 남기고 선택하지 않는다.
 
 ## 전체 책임 흐름
 
@@ -80,7 +80,7 @@ render 호출 수를 줄일 가능성은 있지만 최종 LDR 컬러, 고정 노
 
 1. `ASimGameMode`가 현재 순서대로 course, wall과 ship을 준비하고 `EnterAutonomy`를 성공시킨다.
 2. `AShipPawn`이 소유한 `UShipCapture`가 rig와 render target 설정을 검증한다.
-3. GameMode가 `FShipCourseBuildResult::SlideCm`을 `StartCapture`에 값으로 전달한다.
+3. GameMode가 `FShipCourseBuildResult::SlideCm`의 유한성과 `ACourseBuilder::GetResolvedSlideCm()`과의 일치를 검증한다. 실패하면 `StartCapture`를 호출하지 않고 `CaptureInitializationFailed` setup failure로 종료한다.
 4. `StartCapture`가 unique run directory를 만들고 첫 frame pair를 즉시 캡처한다. 이 pair가 frame 0이고 `time_ms`는 0이다.
 5. 첫 pair가 완전하게 commit된 경우에만 run을 active로 전환한다.
 6. tick 순서는 Navigator, Movement, ShipCapture, SimGameMode다.
@@ -107,7 +107,9 @@ render 호출 수를 줄일 가능성은 있지만 최종 LDR 컬러, 고정 노
 | `ShipAutonomySim/Source/ShipAutonomySim/Private/Tests/ShipCaptureTests.cpp` | scheduler, depth, rig, 파일, manifest, lifecycle와 실제 world 캡처 테스트 |
 | 기존 `ShipMovementTests.cpp` | child component 설정을 단일 actor transform writer 위반으로 오인하지 않도록 정확한 capture mount 한 줄만 whitelist하고 ShipCapture actor mutator 0개를 검사 |
 | 기존 Stage 4 테스트 | capture의 기본 자동 시작과 test-only capture-off 조건에서도 기존 terminal 계약이 유지되는지 검사 |
-| `README.md`, `ShipAutonomySim/SETUP.md` | 구현이 끝난 뒤 Saved 결과를 웹 뷰어로 확인하는 사용법만 필요 최소 범위로 갱신 가능 |
+| `ShipAutonomySim/AGENTS.md` | Stage 4 전용 현재 단계 경계를 Stage 5 이미지 캡처 범위로 갱신하고 기존 로컬 엔진 확인, UObject, 의존성, 제품 파일 절대 경로 금지 규칙을 유지 |
+| `README.md` | Unreal 범위가 Stage 4라는 문장을 Stage 5 캡처까지 구현된 현재 범위로 바꾸고 `Saved/ShipCaptures` 결과와 웹 뷰어 확인 절차를 최소 추가 |
+| `ShipAutonomySim/SETUP.md` | 이미지 캡처가 Stage 4 범위 밖이라는 문장을 제거하고 자동 시작, Saved 실행 폴더, manifest와 컬러/깊이 파일 확인 절차를 최소 추가 |
 
 웹 뷰어 source, 테스트와 더미 데이터 생성기는 변경하지 않는다. 호환성은 생성된 Stage 5 산출물을 현재 validator와 브라우저로 직접 읽어 검증한다.
 
@@ -211,11 +213,11 @@ frame metadata는 UObject 참조가 없는 값 struct와 `TArray`로 보관한�
 깊이 capture는 다음 계약을 사용한다.
 
 - `CaptureSource = SCS_SceneDepth`
-- depth render target은 `InitCustomFormat(Resolution, Resolution, PF_A32B32G32R32F, true)`
-- R 채널에 SceneDepth의 32비트 실수값을 받고 나머지 채널은 의미에 사용하지 않는다.
+- depth render target은 `InitCustomFormat(Resolution, Resolution, PF_R32_FLOAT, true)`
+- 단일 R 채널에 SceneDepth의 32비트 실수값을 받는다.
 - post-process 노출이나 환경 조명으로 깊이를 보정하지 않는다.
 
-`PF_A32B32G32R32F`는 512 x 512에서 depth target만 약 4 MiB이므로 단일 채널 target보다 무겁다. 그래도 공개 `ReadLinearColorPixels`가 32비트 실수값을 변환 없이 반환하는 로컬 5.5.4 경로를 우선한다. 메모리나 frame time을 줄이기 위해 이 선택을 승인 없이 half float나 direct RHI로 바꾸지 않는다.
+`PF_R32_FLOAT`는 pixel당 4 bytes이므로 512 x 512 depth target 자체는 1,048,576 bytes, 약 1 MiB다. 공개 `ReadLinearColorPixels`가 R의 32비트 실수값을 `FLinearColor.R`로 그대로 반환하는 로컬 5.5.4 경로를 사용한다. 성능을 이유로 승인 없이 half float, direct RHI 또는 비동기 경로로 바꾸지 않는다.
 
 ## 로컬 UE 5.5.4 API 근거
 
@@ -231,8 +233,8 @@ frame metadata는 UObject 참조가 없는 값 struct와 `TArray`로 보관한�
 | render target 초기화 | `TextureRenderTarget2D.h`의 `void InitCustomFormat(uint32, uint32, EPixelFormat, bool)`를 사용한다. |
 | render target resource | `TextureRenderTarget.h`의 `ENGINE_API FTextureRenderTargetResource* GameThread_GetRenderTargetResource();`로 game thread에서 resource pointer를 얻고 null을 검사한 뒤 공개 readback 함수를 호출한다. |
 | color readback | `FRenderTarget::ReadPixels(TArray<FColor>&, FReadSurfaceDataFlags, FIntRect)`가 `UnrealClient.h`에 공개돼 있다. U8 surface 값은 그대로 반환한다고 명시한다. |
-| depth readback | `FRenderTarget::ReadLinearColorPixels(TArray<FLinearColor>&, FReadSurfaceDataFlags, FIntRect)`를 `RCM_MinMax`로 호출한다. `RHIDefinitions.h`와 `RHITypes.h`는 `RCM_MinMax`가 값을 바꾸지 않는 권장 모드라고 명시한다. |
-| 32비트 format 선택 | `RHISurfaceDataConversion.h`의 `ConvertRAWSurfaceDataToFLinearColor`는 `PF_A32B32G32R32F`를 `FLinearColor`로 그대로 복사한다. `PF_R32_FLOAT` 분기는 없으므로 공개 동기 readback 설계에는 사용하지 않는다. |
+| depth readback | `UnrealClient.h`의 `ENGINE_API virtual bool ReadLinearColorPixels(TArray<FLinearColor>&, FReadSurfaceDataFlags, FIntRect)`를 `RCM_MinMax`로 호출한다. 주석은 `RCM_MinMax`가 값을 바꾸지 않고 반환한다고 명시하며, `UnrealClient.cpp` 구현은 `RHICmdList.ReadSurfaceData`를 enqueue한 뒤 `FlushRenderingCommands()`하고 결과가 있으면 true를 반환한다. |
+| 32비트 format 선택 | `RHISurfaceDataConversion.h`의 `ConvertRAWSurfaceDataToFLinearColor`에는 `Format == PF_R32_FLOAT` 분기가 있다. 각 source float를 `FLinearColor(SrcPtr[0], 0.f, 0.f, 1.f)`로 복사하고 true를 반환하며 MinMax/UNorm remap을 하지 않는다. 따라서 `RCM_MinMax`와 함께 R의 SceneDepth cm를 공개 동기 경로로 보존한다. |
 | PNG encode | `FModuleManager::LoadModuleChecked<IImageWrapperModule>(FName(TEXT("ImageWrapper")))`로 module을 얻고 `virtual bool CompressImage(TArray64<uint8>&, EImageFormat, const FImageView&, int32 Quality = 0)`를 사용한다. `ImageCore.h`의 `FImageView`는 color `BGRA8`와 depth `G8`을 표현하고 `PngImageWrapper.cpp`는 둘을 직접 지원한다. deprecated `CreateImageWrapper`, `SetRaw`, `GetCompressed` 조합은 사용하지 않는다. |
 | binary file write | `FFileHelper::SaveArrayToFile(TArrayView64<const uint8>, const TCHAR*, IFileManager*, uint32)`를 사용한다. |
 | JSON write | `FJsonObject`, `TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create`와 `FJsonSerializer::Serialize(const TSharedRef<FJsonObject>&, ...)`로 `FString`을 만든 뒤 `FFileHelper::SaveStringToFile(FStringView, const TCHAR*, EEncodingOptions, IFileManager*, uint32)`를 `ForceUTF8WithoutBOM`으로 호출한다. |
@@ -444,7 +446,9 @@ GameMode는 course build, ship spawn, possession과 `EnterAutonomy`가 성공한
 
 capture 시작 전의 slide parse, Water, course, player controller, ship spawn 또는 autonomy failure에서는 capture가 active가 아니므로 finalize 호출은 안전한 no-op이다. 필수 wall slide와 첫 frame이 없는 가짜 manifest는 만들지 않는다.
 
-capture 자체의 rig, directory 또는 첫 pair failure는 `CaptureInitializationFailed`로 기록한다. 이 값은 기존 setup enum 끝에 추가해 기존 numeric 의미를 보존한다. `EShipRunResult`와 terminal 우선순위는 변경하지 않는다.
+build result의 slide가 non-finite이거나 CourseBuilder의 resolved slide와 절대 오차 `1e-9 cm` 안에서 같지 않으면 capture context validation failure다. GameMode는 이 경우 `StartCapture`를 호출하지 않고 `CaptureInitializationFailed`를 기록하며 run directory나 빈 manifest를 만들지 않는다.
+
+capture 자체의 rig, directory 또는 첫 pair failure도 `CaptureInitializationFailed`로 기록한다. 이 값은 기존 setup enum 끝에 추가해 기존 numeric 의미를 보존한다. `EShipRunResult`와 terminal 우선순위는 변경하지 않는다.
 
 `RecordSetupFailure`는 방어적으로 `StopAndFinalize(false)`를 호출하되, active가 아니면 파일을 쓰지 않는 idempotent 계약을 사용한다.
 
@@ -452,8 +456,8 @@ capture 자체의 rig, directory 또는 첫 pair failure는 `CaptureInitializati
 
 - Success는 `StopAndFinalize(true)`를 호출한다.
 - Collision과 Timeout은 `StopAndFinalize(false)`를 호출한다.
-- runtime calculation error는 Stage 4 의미대로 즉시 새 terminal을 만들지 않는다. Navigator와 입력을 멈추고 기존 Timeout 또는 Collision까지 간 뒤 fail로 finalize한다.
-- capture가 중간에 실패해도 항법과 Stage 4 terminal은 그대로 진행한다. final manifest가 가능하면 commit된 이전 pair와 `result: "fail"`을 기록한다.
+- runtime calculation error는 GameMode의 기존 runtime error state에 실패를 latch하고 Navigator와 입력을 멈추지만 새 terminal을 만들거나 그 시점에 finalize하지 않는다. 이후 기존 Timeout 또는 Collision, 또는 먼저 발생한 EndPlay에서 `StopAndFinalize(false)`를 한 번 호출한다.
+- capture runtime error는 `UShipCapture`의 최초 실패 원인과 index를 latch하고 추가 capture만 멈춘다. 항법과 Stage 4 terminal은 그대로 진행하며 오류 시점에는 finalize하지 않는다. 이후 기존 Stage 4 terminal 또는 EndPlay에서 commit된 이전 pair를 `result: "fail"`로 한 번 finalize한다.
 
 ### EndPlay fallback
 
@@ -467,6 +471,7 @@ capture failure는 최초 원인과 발생 index를 한 번 latch하고 추가 c
 
 구분할 최소 failure category는 다음과 같다.
 
+- capture context validation failure인 non-finite 또는 mismatched wall slide
 - invalid configuration 또는 rig mismatch
 - clock invalid 또는 timestamp regression
 - directory create 또는 path collision
@@ -487,9 +492,10 @@ capture failure는 최초 원인과 발생 index를 한 번 latch하고 추가 c
 GameMode는 build success 직후 다음을 검사한다.
 
 - `BuildResult.SlideCm`이 유한하다.
-- `BuildResult.SlideCm`과 `CourseBuilder->GetResolvedSlideCm()`이 허용 오차 안에서 같다.
+- `CourseBuilder->GetResolvedSlideCm()`이 유한하다.
+- `BuildResult.SlideCm`과 `CourseBuilder->GetResolvedSlideCm()`이 절대 오차 `1e-9 cm` 안에서 같다.
 
-검사한 값을 `StartCapture(BuildResult.SlideCm)`에 전달한다. ShipCapture는 값 복사만 보관한다. terminal result는 GameMode가 기존 방식으로 선택하고 bool success/fail 의미만 finalize에 전달한다.
+하나라도 실패하면 capture context validation failure로 분류해 `CaptureInitializationFailed`를 기록하고 `StartCapture`를 호출하지 않으며 폴더나 빈 manifest를 만들지 않는다. 모두 통과한 값만 `StartCapture(BuildResult.SlideCm)`에 전달하고 ShipCapture는 값 복사만 보관한다. terminal result는 GameMode가 기존 방식으로 선택하고 bool success/fail 의미만 finalize에 전달한다.
 
 이 경계로 CourseBuilder는 course 생성, GameMode는 실행 조율과 terminal, ShipCapture는 데이터셋 저장 책임을 유지한다.
 
@@ -513,7 +519,22 @@ GameMode는 build success 직후 다음을 검사한다.
 5. `http://localhost:8000`을 열어 전체 frame preload, color/depth 동기 재생, frame 이동, 실제 경과 표시와 depth colormap을 확인한다.
 6. 확인 뒤 저장소 root에 복사한 생성물만 정확히 제거하고 `git status --short`가 clean인지 확인한다.
 
-구현 단계에서 이 절차가 현재 README만으로 충분하지 않으면 README와 SETUP의 사용법만 갱신한다. manifest loader, query parameter, UI 또는 colormap 코드는 바꾸지 않는다.
+구현 단계에서 `README.md`, `ShipAutonomySim/SETUP.md`, `ShipAutonomySim/AGENTS.md`를 파일 책임 표의 범위대로 반드시 갱신한다. manifest loader, query parameter, UI 또는 colormap 코드는 바꾸지 않는다.
+
+## 완료 검증 실행 순서
+
+완료 검증은 다음 순서를 바꾸지 않는다. 앞 단계가 실패하거나 예상 밖 tracked 또는 untracked 파일이 생기면 다음 단계로 진행하지 않고 보고한다.
+
+1. 첫 단계로 저장소 root의 PowerShell에서 정확히 다음 UE 5.5.4 editor target build를 실행한다.
+
+```powershell
+& "$env:ProgramFiles\Epic Games\UE_5.5\Engine\Build\BatchFiles\Build.bat" ShipAutonomySimEditor Win64 Development "-Project=$((Resolve-Path 'ShipAutonomySim\ShipAutonomySim.uproject').Path)" -WaitMutex
+```
+
+   process exit code 0과 compile error 0을 모두 확인한다. compiler 또는 SDK warning은 별도 기록하되 error와 섞어 성공으로 숨기지 않는다. build가 통과한 뒤 editor 실행 전 MainLevel, Config와 uproject hash 기준선을 기록한다.
+2. 두 번째 단계로 Automation을 실행한다. 별도 invocation의 command는 각각 `-ExecCmds="Automation RunTests ShipAutonomySim.ShipCapture;SoftQuit;"`, `-ExecCmds="Automation RunTests ShipAutonomySim.ShipMovement;SoftQuit;"`, `-ExecCmds="Automation RunTests ShipAutonomySim.ShipNavigation;SoftQuit;"`로 고정한다. 각 command는 `Automation` prefix를 한 번만 쓰고 마지막에 unprefixed `SoftQuit`을 둔다. 등록된 expected test count와 actual-world 회귀 case가 모두 실행됐는지, zero failure/error/unknown/ensure, `TEST COMPLETE. EXIT CODE: 0`과 정상 shutdown을 확인한다.
+3. 세 번째 단계로 `/Game/Maps/MainLevel`을 `-nowrite -ExecCmds="QUIT_EDITOR"`로 load한다. exit code 0, world 생성과 cleanup, MapCheck, LoadErrors 0, Fatal/ensure/crash 0과 clean exit를 확인하고 MainLevel, Config, uproject hash와 Git 상태가 기준선과 같은지 비교한다.
+4. 세 단계가 모두 통과한 뒤에만 성능 A/B와 사람의 viewport 및 웹 뷰어 확인을 수행한다.
 
 ## TDD와 자동 검증
 
@@ -541,11 +562,13 @@ GameMode는 build success 직후 다음을 검사한다.
 - `AShipPawn`에 mount, color/depth capture와 `UShipCapture`가 각 한 개 있다.
 - 두 capture가 같은 parent, identity relative transform, 같은 world transform, FOV와 resolution을 가진다.
 - `bCaptureEveryFrame`과 `bCaptureOnMovement`가 둘 다 false다.
-- color/depth capture source와 target format이 확정값이다.
+- color/depth capture source와 target format이 각각 `SCS_FinalColorLDR`와 `PF_B8G8R8A8`, `SCS_SceneDepth`와 `PF_R32_FLOAT`인지 검사한다.
 - color exposure method, bias와 physical camera flag가 고정값이다.
 - Capture waits for Movement, GameMode waits for Capture prerequisite가 존재한다.
 - `StartCapture` 중복 호출, finalize 중복 호출과 finalize-before-start가 안전하다.
-- GameMode Success는 success, Collision/Timeout/capture failure는 fail manifest를 선택하되 Stage 4 terminal을 덮어쓰지 않는다.
+- non-finite `BuildResult.SlideCm`, non-finite resolved slide와 절대 오차 `1e-9 cm` 밖 mismatch는 모두 `CaptureInitializationFailed`가 되고 `StartCapture`, run directory와 빈 manifest가 생기지 않는다.
+- GameMode Success는 success, Collision/Timeout/runtime calculation error/capture runtime error는 fail manifest를 선택하되 Stage 4 terminal을 덮어쓰지 않는다.
+- runtime calculation error와 capture runtime error 발생 순간에는 `StopAndFinalize`가 호출되지 않고, 이후 기존 terminal 또는 EndPlay에서만 정확히 한 번 호출된다.
 - early setup failure는 폴더나 빈 manifest를 게시하지 않는다.
 - EndPlay fallback이 active run을 한 번만 fail finalize한다.
 
@@ -556,6 +579,7 @@ GameMode는 build success 직후 다음을 검사한다.
 작은 test world와 낮은 test resolution을 사용하되 production 기본값은 바꾸지 않는다.
 
 - color/depth `CaptureScene`과 sync readback이 각각 정확한 pixel count를 반환한다.
+- depth target의 `GetFormat()`이 `PF_R32_FLOAT`이며 `ReadLinearColorPixels(..., RCM_MinMax)` 결과의 R이 알려진 SceneDepth float를 유지하고 변환된 G/B는 0, A는 1인지 검사한다.
 - color PNG signature와 dimensions가 맞고 browser-readable 8-bit color다.
 - depth PNG를 `ImageWrapper`로 다시 decode했을 때 `ERawImageFormat::G8`, bit depth 8과 dimensions가 맞다.
 - known near geometry가 far background보다 큰 grayscale intensity를 가진다.
@@ -567,17 +591,17 @@ GameMode는 build success 직후 다음을 검사한다.
 
 ### actual-world integration
 
-MainLevel, 실제 Water, 고정 조명, 실제 course, Navigator와 Movement를 사용하는 capture-on case를 최소 한 번 실행한다.
+MainLevel, 실제 Water, 고정 조명, 실제 course, Navigator와 Movement를 사용해 `?Stage4Slide=-500`, `?Stage4Slide=0`, `?Stage4Slide=500` 세 capture-on 사례를 각각 fresh world에서 실행한다. 세 사례 모두 production 기본 512 x 512와 100 ms를 유지하며 과도한 11개 full capture-on sweep으로 넓히지 않는다.
 
 - Play 시작 뒤 별도 입력 없이 ship, autonomy와 capture가 모두 active가 된다.
-- forced slide 0 cm run이 기존 terminal Success에 도달한다.
+- 세 사례가 모두 기존 terminal Success에 도달하고 capture failure count가 0이다.
 - setup failure, runtime calculation error, Collision, Timeout, ensure와 crash가 없다.
-- manifest가 terminal 뒤에 한 번만 나타나고 `result`가 success다.
-- `frame_count >= 1`, color 수, depth 수와 frames 수가 모두 같다.
+- 각 manifest가 terminal 뒤에 한 번만 나타나고 `result`가 success이며 `wall_slide_cm`이 해당 `-500`, `0`, `500` cm와 일치한다.
+- 각 사례에서 `frame_count >= 1`, color 수, depth 수와 frames 수가 모두 같다.
 - 모든 frame 파일명이 6자리 연속 index이며 각 pair dimensions가 512 x 512다.
 - `time_ms[0] == 0`, 이후 값은 엄격히 증가하며 hitch에서 같은 timestamp의 burst duplicate가 없다.
 - color와 depth rig의 optical equality를 runtime assertion/log로 확인한다.
-- Stage 4 terminal elapsed, slide와 minimum wall gap 의미는 기존과 같다.
+- 각 사례의 minimum wall gap이 0보다 크고 Stage 4 terminal elapsed와 slide 의미가 기존과 같다.
 
 기존 11-slide Stage 4 sweep은 test-only URL option `?Stage5Capture=0`으로 실행해 항법 자체 회귀를 분리한다. GameMode는 기존 `Stage4Slide`와 같은 `UGameplayStatics::HasOption`과 `ParseOption` 경로를 쓰되 이 option은 `WITH_DEV_AUTOMATION_TESTS`에서만 해석한다. option이 없거나 production build이면 항상 capture-on이므로 product Play 기본 경로에는 capture-off가 없다.
 
@@ -585,12 +609,12 @@ MainLevel, 실제 Water, 고정 조명, 실제 course, Navigator와 Movement를 
 
 성능 검증은 최적화 적용이 아니라 현재 동기 구현의 비용을 수치로 남기는 단계다.
 
-같은 UE build, MainLevel, fixed slide 0 cm, 512 x 512, FOV, 조명, viewport 또는 command-line 조건에서 두 fresh run을 사용한다.
+같은 UE build, MainLevel, fixed slide 0 cm, 512 x 512, FOV, 조명과 command-line 조건에서 네 fresh-world run을 사용한다. 단일 실행 순서의 warm-up과 system load 편향을 줄이기 위해 첫 쌍은 A-B, 둘째 쌍은 B-A 순서로 고정한다.
 
 - A: Stage 5 capture와 저장을 test-only로 끈 baseline
 - B: default capture와 저장을 켠 synchronous path
 
-각 run은 warm-up 구간을 제외하고 실제 시계로 연속 game frame 시작 간격을 기록한다. sample 수, median, p95, maximum frame time을 계산한다. capture-on에서는 각 pair의 두 capture, readback, encode와 write 전체 transaction duration도 별도 기록한다.
+각 run은 warm-up 구간을 제외하고 실제 시계로 연속 game frame 시작 간격을 기록한다. 각 run의 sample 수와 실제 frame-time 분포를 따로 보고하고, A 두 run과 B 두 run의 조건별 집계도 함께 보고한다. capture-on에서는 각 pair의 두 capture, readback, encode와 write 전체 transaction duration을 측정값 그대로 별도 기록한다. 이 측정을 제품 코드 기능으로 만들거나 CSV writer를 추가하지 않는다.
 
 manifest의 인접 `time_ms` 차이로 실제 저장 간격을 계산하고 다음을 보고한다.
 
@@ -601,7 +625,7 @@ manifest의 인접 `time_ms` 차이로 실제 저장 간격을 계산하고 다�
 - 200 ms 이상 missed-slot interval 수
 - duplicate timestamp와 100 ms 미만 catch-up interval 수
 
-성능 수치는 사실로 보고하되 이번 설계에는 임의 pass/fail threshold를 만들지 않는다. frame time 영향이 커도 원인을 동기 GPU readback, PNG encode와 file write로 구분해 제시만 한다. background writer, async GPU readback, lower resolution 또는 다른 format은 사용자 추가 승인 전 구현하지 않는다.
+위 p95와 maximum은 실제 표본에서 계산해 보고할 통계이며 합격 기준이 아니다. 임의 p95, 최대 편차 또는 frame-time pass/fail 수치를 만들지 않는다. 200 ms 이상 missed-slot이 한 건이라도 나오면 이를 정상 100 ms 간격 달성으로 숨기지 않고 run별 원자료와 함께 PM에 성능 우려로 보고한다. frame time 영향이 커도 원인을 동기 GPU readback, PNG encode와 file write로 구분해 제시만 하며 background writer, async GPU readback, lower resolution 또는 다른 format은 사용자 추가 승인 전 구현하지 않는다.
 
 ## Stage 3/4와 map 보호 검증
 
@@ -610,7 +634,7 @@ Stage 5 구현 검증은 다음 회귀를 포함한다.
 - 기존 `ShipAutonomySim.ShipMovement` 12개 테스트를 그대로 통과한다.
 - 기존 `ShipAutonomySim.ShipNavigation` 19개 editor 테스트를 그대로 통과한다.
 - capture-off 조건의 실제 11-slide NavigationSweep가 11 success, collision 0, timeout 0, setup 0, runtime 0과 각 minimum wall distance 0 초과를 유지한다.
-- capture-on actual-world case가 같은 이동 writer와 terminal 의미를 유지한다.
+- capture-on `-500`, `0`, `500` cm 세 fresh-world 사례가 기본 512 x 512와 100 ms에서 모두 terminal success, capture failure 0, 완전한 파일/manifest 계약과 minimum wall gap 0 초과를 유지한다.
 - `npm test`, TypeScript build와 Python 더미 데이터 테스트를 실행해 기존 웹 계약 회귀가 없는지 확인한다.
 
 검증 전후 다음을 비교한다.
@@ -620,7 +644,7 @@ Stage 5 구현 검증은 다음 회귀를 포함한다.
 - uproject hash
 - Git status
 
-MainLevel load 검증은 UE 5.5.4에서 `-nowrite -ExecCmds=QUIT_EDITOR` 계약을 사용하고 exit code, world 생성과 cleanup, MapCheck, LoadErrors, Fatal, ensure, crash와 clean exit를 검사한다. Automation 실행은 필요한 test prefix만 사용하고 마지막에 `SoftQuit`한다.
+실행 순서는 앞의 완료 검증 실행 순서를 따른다. Build.bat build가 exit 0과 compile error 0으로 먼저 통과해야 Automation을 실행하고, Automation이 모두 통과한 뒤에만 UE 5.5.4의 `-nowrite -ExecCmds="QUIT_EDITOR"` MainLevel load를 실행한다. no-write load에서는 exit code, world 생성과 cleanup, MapCheck, LoadErrors, Fatal, ensure, crash와 clean exit를 검사한다.
 
 Saved output은 map/config write가 아니지만 Git 제외 상태를 확인한다. 임의 run 결과를 stage하거나 commit하지 않는다. 예상 밖 tracked 또는 untracked 파일이 생기면 복구, 삭제, reset, restore, clean하지 않고 작업을 중단해 보고한다.
 
@@ -650,22 +674,23 @@ Stage 5 구현은 다음을 모두 충족해야 완료다.
 - automatic capture가 꺼지고 due에서만 두 `CaptureScene()`이 호출된다.
 - first `time_ms` 0, hitch 한 pair, no catch-up burst와 actual timestamp 계약이 통과한다.
 - color fixed exposure와 `SCS_FinalColorLDR` PNG가 동작한다.
-- `SCS_SceneDepth`, `PF_A32B32G32R32F`, `RCM_MinMax` readback과 G8 PNG가 검증된다.
+- `SCS_SceneDepth`, `PF_R32_FLOAT`, `RCM_MinMax` 공개 readback과 G8 PNG가 검증된다.
 - complete pair만 연속 index로 commit되고 partial failure가 manifest에 들어가지 않는다.
 - terminal과 EndPlay finalize가 idempotent이며 exact manifest가 temp write 뒤 같은 directory의 final 이름으로 게시된다.
-- wall slide와 success/fail result가 올바르게 전달된다.
-- capture-on actual-world, performance A/B, Stage 3/4 회귀, no-write와 map/config hash 검증 결과가 새 evidence로 남는다.
+- non-finite 또는 mismatched wall slide가 `CaptureInitializationFailed`로 차단되고 유효 wall slide와 success/fail result만 올바르게 전달된다.
+- Build.bat exit 0과 compile error 0, Automation, no-write load 순서가 통과한다.
+- capture-off 11-slide, capture-on `-500`, `0`, `500` cm fresh-world 사례, A-B와 B-A 성능 측정, Stage 3/4 회귀와 map/config hash 검증 결과가 새 evidence로 남는다.
 - 현재 TypeScript 웹 뷰어가 소스 변경 없이 실제 run을 load하고 재생한다.
-- Source와 필요 최소 사용법 문서 외 map, Config, uproject, 웹 source와 Saved 산출물이 commit에 없다.
+- Source, `README.md`, `ShipAutonomySim/SETUP.md`, `ShipAutonomySim/AGENTS.md`의 필수 최소 갱신 외 map, Config, uproject, 웹 source와 Saved 산출물이 commit에 없다.
 
 ## 남는 위험과 후속 승인 경계
 
 - 두 SceneCapture는 같은 logical instant를 공유하지만 GPU에서 완전히 동시에 실행되는 단일 pass는 아니다. world state가 두 호출 사이 바뀌지 않는 계약으로 일관성을 보장한다.
 - 공개 sync readback은 render thread flush를 포함하므로 frame time이 커질 수 있다. 이는 A/B로 측정할 위험이며 현재 설계 실패를 숨기지 않는다.
-- 128-bit depth target은 정확한 공개 32-bit readback을 위해 메모리와 bandwidth를 더 쓴다.
+- `PF_R32_FLOAT` depth target 자체는 512 x 512에서 약 1 MiB지만 공개 readback은 `TArray<FLinearColor>`를 만들고 render thread를 flush하므로 CPU 임시 메모리와 stall 비용은 A/B에서 확인해야 한다.
 - process crash에서는 EndPlay finalize와 temp cleanup을 보장할 수 없다.
 - disk full이 manifest write까지 막으면 complete 이전 pair가 있어도 최종 manifest가 없을 수 있다. truncated manifest를 게시하는 것보다 이 상태를 선택한다.
-- 성능 개선이 필요해도 async writer, direct RHI, `PF_R32_FLOAT`, half float, resolution 축소 또는 format 변경은 새 비교 설계와 사용자 승인이 있어야 한다.
+- 성능 개선이 필요해도 async writer, direct RHI, half float, resolution 축소 또는 format 변경은 새 비교 설계와 사용자 승인이 있어야 한다.
 
 ## 민감정보와 외부 제공 금지
 
