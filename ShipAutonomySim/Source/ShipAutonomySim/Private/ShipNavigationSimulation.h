@@ -47,6 +47,11 @@ FShipCourseDefinition BuildCourseDefinition(
     const FTransform& CourseFrame,
     double WaterSurfaceZCm,
     double SlideCm);
+bool ValidateWaterReference(
+    bool bInExclusionVolume,
+    double SurfaceZCm,
+    double& OutSurfaceZCm,
+    EShipSetupFailure& OutFailure);
 bool AdvancePathProgress(
     const TArray<FVector>& WorldPath,
     const FVector& ShipWorldLocation,

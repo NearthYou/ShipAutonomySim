@@ -1,6 +1,14 @@
 #if WITH_DEV_AUTOMATION_TESTS
 #include <limits>
 
+#include "Components/StaticMeshComponent.h"
+#include "CourseBuilder.h"
+#include "Engine/Engine.h"
+#include "Engine/GameInstance.h"
+#include "Engine/StaticMeshActor.h"
+#include "Engine/TargetPoint.h"
+#include "Engine/World.h"
+#include "Kismet/GameplayStatics.h"
 #include "Misc/AutomationTest.h"
 #include "ShipNavigationSimulation.h"
 #include "ShipNavigationTypes.h"
@@ -20,6 +28,70 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     FShipCourseFrameTransformTest,
     "ShipAutonomySim.ShipNavigation.Unit.Course.FrameTransform",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipCourseRuntimeSetupFailureTest,
+    "ShipAutonomySim.ShipNavigation.Unit.Course.RuntimeSetupFailure",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+class FScopedCourseTestWorld
+{
+public:
+    FScopedCourseTestWorld()
+    {
+        GameInstance = NewObject<UGameInstance>(GEngine);
+        GameInstance->AddToRoot();
+        const FName WorldName = MakeUniqueObjectName(
+            GetTransientPackage(),
+            UWorld::StaticClass(),
+            TEXT("ShipCourseAutomationWorld"));
+        GameInstance->InitializeStandalone(WorldName, GetTransientPackage());
+        World = GameInstance->GetWorld();
+        check(World != nullptr && World->SetGameMode(FURL()));
+        World->InitializeActorsForPlay(FURL());
+    }
+
+    ~FScopedCourseTestWorld()
+    {
+        if (World != nullptr && World->HasBegunPlay())
+        {
+            World->EndPlay(EEndPlayReason::Quit);
+        }
+        if (GameInstance != nullptr)
+        {
+            GameInstance->Shutdown();
+            GameInstance->RemoveFromRoot();
+        }
+        if (World != nullptr)
+        {
+            GEngine->DestroyWorldContext(World);
+            World->DestroyWorld(false);
+        }
+    }
+
+    UGameInstance* GameInstance = nullptr;
+    UWorld* World = nullptr;
+};
+
+struct FCourseBuilderTestAccessor
+{
+    static FVector LastWaterQueryLocation(const ACourseBuilder& Builder)
+    {
+        return Builder.TestLastWaterQueryLocation;
+    }
+
+    static int32 RandomCourseLogCount(const ACourseBuilder& Builder)
+    {
+        return Builder.TestRandomCourseLogCount;
+    }
+
+    static void SetWaterSurfaceOverride(
+        ACourseBuilder& Builder,
+        double WaterSurfaceZCm)
+    {
+        Builder.TestWaterSurfaceOverrideCm = WaterSurfaceZCm;
+    }
+};
 
 bool FStage4SlideOptionClassificationTest::RunTest(const FString&)
 {
@@ -176,6 +248,202 @@ bool FShipCourseFrameTransformTest::RunTest(const FString&)
     TestTrue(TEXT("wall uses flat frame and reference height"),
         Course.WallWorld.Equals(FVector(0.0, 1200.0, 175.0), 1e-6));
 
+    return !HasAnyErrors();
+}
+
+bool FShipCourseRuntimeSetupFailureTest::RunTest(const FString&)
+{
+    double SurfaceZCm = 123.0;
+    EShipSetupFailure Failure = EShipSetupFailure::None;
+    TestFalse(TEXT("exclusion rejects finite water surface"),
+        ValidateWaterReference(true, 50.0, SurfaceZCm, Failure));
+    TestEqual(TEXT("exclusion has priority"),
+        Failure, EShipSetupFailure::WaterLocationExcluded);
+    TestEqual(TEXT("exclusion clears output surface"), SurfaceZCm, 0.0);
+
+    SurfaceZCm = 123.0;
+    Failure = EShipSetupFailure::None;
+    TestFalse(TEXT("non-finite water surface rejected"),
+        ValidateWaterReference(
+            false,
+            std::numeric_limits<double>::quiet_NaN(),
+            SurfaceZCm,
+            Failure));
+    TestEqual(TEXT("non-finite water failure"),
+        Failure, EShipSetupFailure::WaterSurfaceUnavailable);
+    TestEqual(TEXT("non-finite clears output surface"), SurfaceZCm, 0.0);
+
+    SurfaceZCm = 0.0;
+    Failure = EShipSetupFailure::WaterSurfaceUnavailable;
+    TestTrue(TEXT("finite non-excluded water succeeds"),
+        ValidateWaterReference(false, 75.0, SurfaceZCm, Failure));
+    TestEqual(TEXT("finite water clears failure"),
+        Failure, EShipSetupFailure::None);
+    TestEqual(TEXT("finite water preserves surface"), SurfaceZCm, 75.0);
+
+    FScopedCourseTestWorld TestWorld;
+    const FTransform RandomBuilderTransform(
+        FRotator(20.0, 90.0, 15.0),
+        FVector(100.0, 200.0, 900.0),
+        FVector(2.0, 3.0, 4.0));
+    FActorSpawnParameters SpawnParameters;
+    SpawnParameters.SpawnCollisionHandlingOverride =
+        ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    ACourseBuilder* RandomBuilder = TestWorld.World->SpawnActor<ACourseBuilder>(
+        ACourseBuilder::StaticClass(),
+        RandomBuilderTransform,
+        SpawnParameters);
+    TestNotNull(TEXT("random course builder spawned"), RandomBuilder);
+    if (RandomBuilder == nullptr)
+    {
+        return false;
+    }
+
+    FShipCourseBuildResult RandomResult;
+    Failure = EShipSetupFailure::None;
+    TestFalse(TEXT("world without Ocean cannot build course"),
+        RandomBuilder->BuildRuntimeCourse(RandomResult, Failure));
+    TestEqual(TEXT("missing Ocean classification"),
+        Failure, EShipSetupFailure::WaterSurfaceUnavailable);
+    TestNull(TEXT("failed build has no start target"),
+        RandomBuilder->GetStartTarget());
+    TestNull(TEXT("failed build has no end target"),
+        RandomBuilder->GetEndTarget());
+    TestNull(TEXT("failed build has no wall"),
+        RandomBuilder->GetWallActor());
+    TestEqual(TEXT("failed build has no path"),
+        RandomBuilder->GetWorldPath().Num(), 0);
+    TestNull(TEXT("failed result has no start target"), RandomResult.StartTarget);
+    TestNull(TEXT("failed result has no end target"), RandomResult.EndTarget);
+    TestNull(TEXT("failed result has no wall"), RandomResult.WallActor);
+    TestEqual(TEXT("failed result has no path"), RandomResult.WorldPath.Num(), 0);
+    TestEqual(TEXT("result and getter expose same random seed"),
+        RandomResult.RandomSeed,
+        RandomBuilder->GetResolvedRandomSeed());
+    TestNotEqual(TEXT("absent slide uses time-derived seed"),
+        RandomResult.RandomSeed, 0);
+    TestTrue(TEXT("random slide stays in configured range"),
+        RandomResult.SlideCm >= -500.0 && RandomResult.SlideCm <= 500.0);
+    TestTrue(TEXT("result and getter expose same random slide"),
+        FMath::IsNearlyEqual(
+            RandomResult.SlideCm,
+            RandomBuilder->GetResolvedSlideCm(),
+            1e-9));
+    TestEqual(TEXT("random course marker logged once"),
+        FCourseBuilderTestAccessor::RandomCourseLogCount(*RandomBuilder), 1);
+
+    const FShipCourseDefinition RandomPlanarDefinition = BuildCourseDefinition(
+        RandomBuilder->GetActorTransform(),
+        0.0,
+        RandomResult.SlideCm);
+    const FVector QueryLocation =
+        FCourseBuilderTestAccessor::LastWaterQueryLocation(*RandomBuilder);
+    TestTrue(TEXT("water query uses transformed wall X"),
+        FMath::IsNearlyEqual(
+            QueryLocation.X,
+            RandomPlanarDefinition.WallWorld.X,
+            1e-6));
+    TestTrue(TEXT("water query uses transformed wall Y"),
+        FMath::IsNearlyEqual(
+            QueryLocation.Y,
+            RandomPlanarDefinition.WallWorld.Y,
+            1e-6));
+
+    ACourseBuilder* ForcedBuilder = TestWorld.World->SpawnActor<ACourseBuilder>();
+    TestNotNull(TEXT("forced course builder spawned"), ForcedBuilder);
+    if (ForcedBuilder == nullptr)
+    {
+        return false;
+    }
+    ForcedBuilder->SetForcedSlideCm(250.0);
+    FCourseBuilderTestAccessor::SetWaterSurfaceOverride(*ForcedBuilder, 75.0);
+    FShipCourseBuildResult ForcedResult;
+    Failure = EShipSetupFailure::WaterSurfaceUnavailable;
+    TestTrue(TEXT("forced course builds with validated test water"),
+        ForcedBuilder->BuildRuntimeCourse(ForcedResult, Failure));
+    TestEqual(TEXT("forced course clears failure"),
+        Failure, EShipSetupFailure::None);
+    TestEqual(TEXT("forced course uses seed zero"), ForcedResult.RandomSeed, 0);
+    TestEqual(TEXT("forced course does not log random marker"),
+        FCourseBuilderTestAccessor::RandomCourseLogCount(*ForcedBuilder), 0);
+    TestEqual(TEXT("forced slide preserved"), ForcedResult.SlideCm, 250.0);
+    TestEqual(TEXT("forced water surface preserved"),
+        ForcedResult.WaterSurfaceZCm, 75.0);
+    TestEqual(TEXT("forced path has exactly three points"),
+        ForcedResult.WorldPath.Num(), 3);
+    TestTrue(TEXT("start getter matches result"),
+        ForcedBuilder->GetStartTarget() == ForcedResult.StartTarget);
+    TestTrue(TEXT("end getter matches result"),
+        ForcedBuilder->GetEndTarget() == ForcedResult.EndTarget);
+    TestTrue(TEXT("wall getter matches result"),
+        ForcedBuilder->GetWallActor() == ForcedResult.WallActor);
+    TestEqual(TEXT("path getter matches result size"),
+        ForcedBuilder->GetWorldPath().Num(), ForcedResult.WorldPath.Num());
+    if (ForcedResult.WorldPath.Num() == 3)
+    {
+        TestTrue(TEXT("start target uses path start"),
+            ForcedResult.StartTarget != nullptr
+            && ForcedResult.StartTarget->GetActorLocation().Equals(
+                ForcedResult.WorldPath[0], 1e-6));
+        TestTrue(TEXT("end target uses path end"),
+            ForcedResult.EndTarget != nullptr
+            && ForcedResult.EndTarget->GetActorLocation().Equals(
+                ForcedResult.WorldPath[2], 1e-6));
+    }
+    if (ForcedResult.WallActor != nullptr)
+    {
+        UStaticMeshComponent* WallMesh =
+            ForcedResult.WallActor->GetStaticMeshComponent();
+        TestNotNull(TEXT("wall mesh component exists"), WallMesh);
+        if (WallMesh != nullptr)
+        {
+            TestNotNull(
+                TEXT("wall cube mesh assigned"),
+                WallMesh->GetStaticMesh().Get());
+            TestEqual(TEXT("wall is static"),
+                WallMesh->Mobility, EComponentMobility::Static);
+            TestEqual(TEXT("wall collision is query only"),
+                WallMesh->GetCollisionEnabled(), ECollisionEnabled::QueryOnly);
+            TestEqual(TEXT("wall object type is world static"),
+                WallMesh->GetCollisionObjectType(), ECC_WorldStatic);
+            TestEqual(TEXT("wall blocks pawn"),
+                WallMesh->GetCollisionResponseToChannel(ECC_Pawn), ECR_Block);
+            TestEqual(TEXT("wall ignores world dynamic"),
+                WallMesh->GetCollisionResponseToChannel(ECC_WorldDynamic),
+                ECR_Ignore);
+        }
+    }
+
+    TArray<AActor*> TargetsBefore;
+    TArray<AActor*> WallsBefore;
+    UGameplayStatics::GetAllActorsOfClass(
+        TestWorld.World, ATargetPoint::StaticClass(), TargetsBefore);
+    UGameplayStatics::GetAllActorsOfClass(
+        TestWorld.World, AStaticMeshActor::StaticClass(), WallsBefore);
+    FShipCourseBuildResult DuplicateResult;
+    Failure = EShipSetupFailure::None;
+    TestFalse(TEXT("repeated build is rejected"),
+        ForcedBuilder->BuildRuntimeCourse(DuplicateResult, Failure));
+    TestEqual(TEXT("repeated build classification"),
+        Failure, EShipSetupFailure::CourseSpawnFailed);
+    TArray<AActor*> TargetsAfter;
+    TArray<AActor*> WallsAfter;
+    UGameplayStatics::GetAllActorsOfClass(
+        TestWorld.World, ATargetPoint::StaticClass(), TargetsAfter);
+    UGameplayStatics::GetAllActorsOfClass(
+        TestWorld.World, AStaticMeshActor::StaticClass(), WallsAfter);
+    TestEqual(TEXT("repeated build creates no targets"),
+        TargetsAfter.Num(), TargetsBefore.Num());
+    TestEqual(TEXT("repeated build creates no walls"),
+        WallsAfter.Num(), WallsBefore.Num());
+    TestTrue(TEXT("repeated build preserves start reference"),
+        ForcedBuilder->GetStartTarget() == ForcedResult.StartTarget);
+    TestTrue(TEXT("repeated build preserves end reference"),
+        ForcedBuilder->GetEndTarget() == ForcedResult.EndTarget);
+    TestTrue(TEXT("repeated build preserves wall reference"),
+        ForcedBuilder->GetWallActor() == ForcedResult.WallActor);
+
+    ForcedBuilder->ClearForcedSlide();
     return !HasAnyErrors();
 }
 

@@ -277,6 +277,29 @@ FShipCourseDefinition BuildCourseDefinition(
     return Definition;
 }
 
+bool ValidateWaterReference(
+    bool bInExclusionVolume,
+    double SurfaceZCm,
+    double& OutSurfaceZCm,
+    EShipSetupFailure& OutFailure)
+{
+    OutSurfaceZCm = 0.0;
+    if (bInExclusionVolume)
+    {
+        OutFailure = EShipSetupFailure::WaterLocationExcluded;
+        return false;
+    }
+    if (!FMath::IsFinite(SurfaceZCm))
+    {
+        OutFailure = EShipSetupFailure::WaterSurfaceUnavailable;
+        return false;
+    }
+
+    OutSurfaceZCm = SurfaceZCm;
+    OutFailure = EShipSetupFailure::None;
+    return true;
+}
+
 bool AdvancePathProgress(
     const TArray<FVector>& WorldPath,
     const FVector& ShipWorldLocation,
