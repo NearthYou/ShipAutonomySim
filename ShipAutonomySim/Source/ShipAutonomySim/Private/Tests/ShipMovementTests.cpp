@@ -1210,4 +1210,72 @@ bool FShipPawnFocusLossTest::RunTest(const FString&)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FSimGameModeBootstrapTest,
+    "ShipAutonomySim.ShipMovement.GameMode.Bootstrap",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+struct FSimGameModeTestAccessor
+{
+    static void EnsureTestShipForFirstPlayer(ASimGameMode& GameMode)
+    {
+        GameMode.EnsureTestShipForFirstPlayer();
+    }
+    static int32 BeginPlayInvocationCount(const ASimGameMode& GameMode)
+    {
+        return GameMode.TestBeginPlayInvocationCount;
+    }
+};
+
+bool FSimGameModeBootstrapTest::RunTest(const FString&)
+{
+    FScopedShipInputWorld Input;
+    AShipPawn& InputShip = Input.PossessShip();
+    ASimGameMode* GameMode =
+        Cast<ASimGameMode>(Input.World->GetAuthGameMode());
+    TestNotNull(TEXT("project GameMode exists"), GameMode);
+    if (GameMode == nullptr)
+    {
+        return false;
+    }
+    TestTrue(TEXT("GameMode used normal BeginPlay lifecycle"),
+        GameMode->HasActorBegunPlay());
+    TestEqual(TEXT("GameMode BeginPlay ran exactly once"),
+        FSimGameModeTestAccessor::BeginPlayInvocationCount(*GameMode), 1);
+    TestNotNull(TEXT("real LocalPlayer"),
+        Input.Controller->GetLocalPlayer());
+    TestNotNull(TEXT("real Enhanced subsystem"), Input.Subsystem);
+    AShipPawn* PossessedShip = Cast<AShipPawn>(Input.Controller->GetPawn());
+    TestNotNull(TEXT("ship possessed"), PossessedShip);
+    TestTrue(TEXT("fixture returned possessed ship"),
+        PossessedShip == &InputShip);
+    if (PossessedShip != nullptr)
+    {
+        TestNotNull(TEXT("possessed ship has Enhanced input component"),
+            Cast<UEnhancedInputComponent>(PossessedShip->InputComponent));
+        TestTrue(TEXT("manual context registered"),
+            Input.Subsystem->HasMappingContext(
+                &FShipPawnTestAccessor::Mapping(*PossessedShip)));
+    }
+    TArray<AActor*> Ships;
+    UGameplayStatics::GetAllActorsOfClass(
+        Input.World,
+        AShipPawn::StaticClass(),
+        Ships);
+    TestEqual(TEXT("one ship"), Ships.Num(), 1);
+    FSimGameModeTestAccessor::EnsureTestShipForFirstPlayer(*GameMode);
+    FSimGameModeTestAccessor::EnsureTestShipForFirstPlayer(*GameMode);
+    Ships.Reset();
+    UGameplayStatics::GetAllActorsOfClass(
+        Input.World,
+        AShipPawn::StaticClass(),
+        Ships);
+    TestEqual(TEXT("helper remains idempotent"), Ships.Num(), 1);
+    TestTrue(TEXT("same ship remains possessed"),
+        Input.Controller->GetPawn() == PossessedShip);
+    TestEqual(TEXT("helper does not redispatch BeginPlay"),
+        FSimGameModeTestAccessor::BeginPlayInvocationCount(*GameMode), 1);
+    return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
