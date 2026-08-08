@@ -29,22 +29,54 @@
 
 ## 시작 게이트
 
-구현 세션 시작 전 아래 네 조건을 한 번에 확인한다. 하나라도 다르면 file, index, ref를 바꾸지 않고 No-Go로 종료한다.
+PM은 구현 handoff에 `ApprovedPlanSha`라는 이름으로 승인된 계획 commit의 40자리 SHA를 반드시 전달한다. 구현자는 handoff에서 받은 값을 아래 PowerShell parameter에 입력한다. 값이 누락되거나 형식 또는 HEAD가 다르면 추측하거나 현재 HEAD로 자동 대체하지 않고 file, index, ref를 바꾸기 전에 No-Go로 종료한다.
 
 ```powershell
+param([string]$ApprovedPlanSha)
+
 $ErrorActionPreference = 'Stop'
+$Plan = 'docs/superpowers/plans/2026-08-09-ship-autonomy-navigation.md'
 $ExpectedBranch = 'feat/ship-autonomy-navigation'
-$ExpectedHead = '5bb13544cde567be17179b2c0b6bddd4ff98c26c'
-$ActualBranch = git branch --show-current
+
+if ([string]::IsNullOrWhiteSpace($ApprovedPlanSha)) {
+    throw 'No-Go ApprovedPlanSha is required from the PM handoff'
+}
+if ($ApprovedPlanSha -cnotmatch '\A[0-9a-fA-F]{40}\z') {
+    throw 'No-Go ApprovedPlanSha must be exactly 40 hexadecimal characters'
+}
+
 $ActualHead = git rev-parse HEAD
+if ($ActualHead -cne $ApprovedPlanSha) {
+    throw "No-Go approved=$ApprovedPlanSha head=$ActualHead"
+}
+
+$ActualBranch = git branch --show-current
+if ($ActualBranch -ne $ExpectedBranch) {
+    throw "No-Go branch=$ActualBranch expected=$ExpectedBranch"
+}
+
 $Porcelain = @(git status --porcelain=v1)
+if ($Porcelain.Count -ne 0) {
+    throw "No-Go worktree changes=$($Porcelain.Count)"
+}
+
+git ls-files --error-unmatch -- $Plan | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw 'No-Go approved plan file is not tracked'
+}
+
+git diff --quiet HEAD -- $Plan
+if ($LASTEXITCODE -ne 0) {
+    throw 'No-Go approved plan file differs from HEAD'
+}
+
 $EditorCount = @(Get-Process UnrealEditor,UnrealEditor-Cmd -ErrorAction SilentlyContinue).Count
-if ($ActualBranch -ne $ExpectedBranch -or $ActualHead -ne $ExpectedHead -or $Porcelain.Count -ne 0 -or $EditorCount -ne 0) {
-    throw "No-Go branch=$ActualBranch head=$ActualHead changes=$($Porcelain.Count) editors=$EditorCount"
+if ($EditorCount -ne 0) {
+    throw "No-Go UnrealEditor processes=$EditorCount"
 }
 ```
 
-예상 출력 조건은 branch `feat/ship-autonomy-navigation`, HEAD `5bb13544cde567be17179b2c0b6bddd4ff98c26c`, 변경 0, UnrealEditor 계열 process 0이다. 계획 파일은 이 HEAD에 이미 추적된 상태여야 하며 `git ls-files --error-unmatch -- docs/superpowers/plans/2026-08-09-ship-autonomy-navigation.md`로 확인한다. 최초 Task commit 뒤에는 고정 HEAD 비교 대신 직전 Task commit SHA를 기록하고 branch, clean, process 조건을 계속 확인한다.
+예상 조건은 `ApprovedPlanSha`가 PM handoff에 있고 정확한 40자리 hex이며 현재 HEAD와 정확히 같고, branch `feat/ship-autonomy-navigation`, clean worktree, tracked 및 HEAD와 동일한 계획 파일, UnrealEditor 계열 process 0이다. 최초 Task commit 뒤에는 승인 계획 SHA 비교 대신 직전 Task commit SHA를 기록하고 branch, clean, process 조건을 계속 확인한다.
 
 ## 변경 파일 구조 고정
 
@@ -2020,21 +2052,42 @@ git -C $Repo diff --name-only -- ShipAutonomySim/Content ShipAutonomySim/Config
 - [ ] 모든 Windows path와 `ExecCmds` quoting, Automation prefix 1회, 마지막 `SoftQuit`, no-write `QUIT_EDITOR`를 확인한다.
 - [ ] 구현 완료, build 성공, Automation 통과를 현재 사실로 서술한 문장이 없는지 확인한다.
 - [ ] 미완성 표기, 가운데점 문자, required header 외 star 강조, 임의 branch 명명, 외부 service 전달 문구가 없는지 확인한다.
-- [ ] `git diff --check`가 통과하고 branch와 HEAD가 시작 게이트와 같으며 worktree가 clean이고 계획 파일이 tracked 상태인지 확인한다.
+- [ ] 계획 문서에 특정 40자리 plan SHA가 hard-coded되지 않았고, PM handoff의 필수 `ApprovedPlanSha` input과 40자리 hex, HEAD 일치, 고정 branch, clean, tracked, plan diff gate가 시작 게이트에 모두 있는지 확인한다.
+- [ ] `git diff --check`가 통과하고 worktree가 clean이며 UnrealEditor 계열 process가 0인지 확인한다.
 
 ```powershell
+param([string]$ApprovedPlanSha)
+
 $Plan = 'docs/superpowers/plans/2026-08-09-ship-autonomy-navigation.md'
 $ExpectedBranch = 'feat/ship-autonomy-navigation'
-$ExpectedHead = '5bb13544cde567be17179b2c0b6bddd4ff98c26c'
+
+if ([string]::IsNullOrWhiteSpace($ApprovedPlanSha)) {
+    throw 'ApprovedPlanSha is required from the PM handoff'
+}
+if ($ApprovedPlanSha -cnotmatch '\A[0-9a-fA-F]{40}\z') {
+    throw 'ApprovedPlanSha must be exactly 40 hexadecimal characters'
+}
+
 $ActualBranch = git branch --show-current
 $ActualHead = git rev-parse HEAD
 $Changed = @(git status --porcelain=v1)
-if ($ActualBranch -ne $ExpectedBranch -or $ActualHead -ne $ExpectedHead -or $Changed.Count -ne 0) {
-    throw "Plan gate mismatch branch=$ActualBranch head=$ActualHead changes=$($Changed.Count)"
+if ($ActualHead -cne $ApprovedPlanSha) {
+    throw "Approved plan mismatch approved=$ApprovedPlanSha head=$ActualHead"
+}
+if ($ActualBranch -ne $ExpectedBranch -or $Changed.Count -ne 0) {
+    throw "Plan gate mismatch branch=$ActualBranch changes=$($Changed.Count)"
 }
 git ls-files --error-unmatch -- $Plan | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw 'Plan file must already be tracked'
+}
+git diff --quiet HEAD -- $Plan
+if ($LASTEXITCODE -ne 0) {
+    throw 'Plan file differs from HEAD'
+}
+$EditorCount = @(Get-Process UnrealEditor,UnrealEditor-Cmd -ErrorAction SilentlyContinue).Count
+if ($EditorCount -ne 0) {
+    throw "UnrealEditor processes must be zero, found $EditorCount"
 }
 $Tasks = @(Select-String -LiteralPath $Plan -Pattern '^### Task [1-9]:' -Encoding UTF8)
 if ($Tasks.Count -ne 9) {
@@ -2048,6 +2101,32 @@ $ForbiddenTokens = @(
     ('나중' + '에')
 )
 $PlanText = Get-Content -Raw -Encoding UTF8 -LiteralPath $Plan
+$HardCodedPlanShas = [regex]::Matches(
+    $PlanText,
+    '(?i)(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])')
+if ($HardCodedPlanShas.Count -ne 0) {
+    throw "Hard-coded 40-character plan SHA found: $($HardCodedPlanShas.Count)"
+}
+$GateStart = $PlanText.IndexOf('## 시작 게이트')
+$GateEnd = $PlanText.IndexOf('## 변경 파일 구조 고정', $GateStart)
+if ($GateStart -lt 0 -or $GateEnd -le $GateStart) {
+    throw 'Start gate section boundaries are missing'
+}
+$GateText = $PlanText.Substring($GateStart, $GateEnd - $GateStart)
+$RequiredGateFragments = @(
+    'param([string]$ApprovedPlanSha)',
+    '\A[0-9a-fA-F]{40}\z',
+    '$ActualHead -cne $ApprovedPlanSha',
+    '$ActualBranch -ne $ExpectedBranch',
+    'git status --porcelain=v1',
+    'git ls-files --error-unmatch -- $Plan',
+    'git diff --quiet HEAD -- $Plan'
+)
+foreach ($Fragment in $RequiredGateFragments) {
+    if (-not $GateText.Contains($Fragment)) {
+        throw "Required ApprovedPlanSha gate fragment missing: $Fragment"
+    }
+}
 foreach ($Token in $ForbiddenTokens) {
     if ($PlanText.Contains($Token)) {
         throw "Incomplete marker found in plan: $Token"
