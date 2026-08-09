@@ -14,6 +14,7 @@
 #include "Misc/Guid.h"
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
+#include "ShipCaptureBundle.h"
 #include "ShipPawn.h"
 #include "ShipCaptureSimulation.h"
 #include "Serialization/JsonSerializer.h"
@@ -721,8 +722,11 @@ bool UShipCapture::CleanupManifestPaths(
     return bCleanupSucceeded;
 }
 
-bool UShipCapture::WriteManifest(bool bSimulationSucceeded)
+bool UShipCapture::SerializeManifest(
+    bool bSimulationSucceeded,
+    FString& OutJsonText)
 {
+    OutJsonText.Reset();
     if (Frames.IsEmpty() || RunDirectoryPath.IsEmpty())
     {
         return false;
@@ -760,17 +764,25 @@ bool UShipCapture::WriteManifest(bool bSimulationSucceeded)
     }
     Root->SetArrayField(TEXT("frames"), MoveTemp(FrameValues));
 
-    FString JsonText;
     const TSharedRef<
         TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
         TJsonWriterFactory<
             TCHAR,
-            TCondensedJsonPrintPolicy<TCHAR>>::Create(&JsonText);
-    if (!FJsonSerializer::Serialize(Root, Writer) || JsonText.IsEmpty())
+            TCondensedJsonPrintPolicy<TCHAR>>::Create(&OutJsonText);
+    if (!FJsonSerializer::Serialize(Root, Writer) || OutJsonText.IsEmpty())
     {
         return LatchCaptureFailure(
             EShipCaptureFailureCategory::ManifestSerialize,
             NextFrameIndex);
+    }
+    return true;
+}
+
+bool UShipCapture::WriteManifest(const FString& JsonText)
+{
+    if (JsonText.IsEmpty() || RunDirectoryPath.IsEmpty())
+    {
+        return false;
     }
 
     const FString ManifestTempPath =
@@ -829,6 +841,118 @@ bool UShipCapture::WriteManifest(bool bSimulationSucceeded)
     return true;
 }
 
+bool UShipCapture::WriteBinaryBundle(const FString& ManifestJsonText)
+{
+    if (ManifestJsonText.IsEmpty() ||
+        Frames.IsEmpty() ||
+        RunDirectoryPath.IsEmpty())
+    {
+        return false;
+    }
+
+    TArray<FShipCaptureBundleAsset> Assets;
+    Assets.Reserve(Frames.Num() * 2);
+    for (const FShipCaptureFrameRecord& Frame : Frames)
+    {
+        for (const FString* LeafName : {
+                 &Frame.ColorLeafName,
+                 &Frame.DepthLeafName})
+        {
+            FShipCaptureBundleAsset Asset;
+            Asset.Path = *LeafName;
+            Asset.MediaType = TEXT("image/png");
+            if (!FFileHelper::LoadFileToArray(
+                    Asset.Bytes,
+                    *(RunDirectoryPath / *LeafName)))
+            {
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("Stage5CaptureBundleReadFailed path=%s"),
+                    **LeafName);
+                return false;
+            }
+            Assets.Add(MoveTemp(Asset));
+        }
+    }
+
+    TArray64<uint8> BundleBytes;
+    if (!BuildShipCaptureBundle(
+            ManifestJsonText,
+            Assets,
+            BundleBytes))
+    {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("Stage5CaptureBundleBuildFailed frames=%d"),
+            Frames.Num());
+        return false;
+    }
+
+    const FString BundleTempPath =
+        RunDirectoryPath / TEXT(".sequence.siv.tmp");
+    const FString BundleFinalPath =
+        RunDirectoryPath / TEXT("sequence.siv");
+    if (IFileManager::Get().FileExists(*BundleTempPath) ||
+        IFileManager::Get().FileExists(*BundleFinalPath) ||
+        IFileManager::Get().DirectoryExists(*BundleTempPath) ||
+        IFileManager::Get().DirectoryExists(*BundleFinalPath))
+    {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("Stage5CaptureBundlePathCollision run=%s"),
+            *RunRelativePath);
+        return false;
+    }
+
+    const auto CleanupBundlePaths = [&BundleTempPath, &BundleFinalPath]()
+    {
+        for (const FString* Path : {&BundleTempPath, &BundleFinalPath})
+        {
+            if (IFileManager::Get().FileExists(**Path))
+            {
+                IFileManager::Get().Delete(**Path, true, false, true);
+            }
+        }
+    };
+
+    if (!FFileHelper::SaveArrayToFile(BundleBytes, *BundleTempPath) ||
+        !IFileManager::Get().FileExists(*BundleTempPath) ||
+        IFileManager::Get().FileSize(*BundleTempPath) != BundleBytes.Num())
+    {
+        CleanupBundlePaths();
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("Stage5CaptureBundleWriteFailed run=%s"),
+            *RunRelativePath);
+        return false;
+    }
+
+    const bool bBundleRenamed = IFileManager::Get().Move(
+        *BundleFinalPath,
+        *BundleTempPath,
+        false,
+        false,
+        false,
+        true);
+    if (!bBundleRenamed ||
+        !IFileManager::Get().FileExists(*BundleFinalPath) ||
+        IFileManager::Get().FileSize(*BundleFinalPath) != BundleBytes.Num())
+    {
+        CleanupBundlePaths();
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("Stage5CaptureBundleRenameFailed run=%s"),
+            *RunRelativePath);
+        return false;
+    }
+    return true;
+}
+
 void UShipCapture::StopAndFinalize(bool bSimulationSucceeded)
 {
     SetComponentTickEnabled(false);
@@ -841,19 +965,33 @@ void UShipCapture::StopAndFinalize(bool bSimulationSucceeded)
 
     LifecycleState = EShipCaptureLifecycleState::Finalizing;
     ++FinalizeAttemptCount;
-    const bool bManifestPublished =
-        Frames.IsEmpty() || WriteManifest(bSimulationSucceeded);
+    bool bManifestPublished = Frames.IsEmpty();
+    bool bBundlePublished = false;
+    if (!Frames.IsEmpty())
+    {
+        FString ManifestJsonText;
+        bManifestPublished =
+            SerializeManifest(bSimulationSucceeded, ManifestJsonText) &&
+            WriteManifest(ManifestJsonText);
+        if (bManifestPublished)
+        {
+            bBundlePublished = WriteBinaryBundle(ManifestJsonText);
+        }
+    }
     LifecycleState = EShipCaptureLifecycleState::Finalized;
     UE_LOG(
         LogTemp,
         Display,
-        TEXT("Stage5CaptureFinalized result=%s frames=%d manifest=%s run=%s"),
+        TEXT("Stage5CaptureFinalized result=%s frames=%d manifest=%s bundle=%s run=%s"),
         bSimulationSucceeded && !bCaptureFailureLatched &&
                 bManifestPublished
             ? TEXT("success")
             : TEXT("fail"),
         Frames.Num(),
         bManifestPublished && !Frames.IsEmpty()
+            ? TEXT("published")
+            : TEXT("not_published"),
+        bBundlePublished
             ? TEXT("published")
             : TEXT("not_published"),
         RunRelativePath.IsEmpty()

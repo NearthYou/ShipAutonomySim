@@ -24,7 +24,7 @@
 1. `/Game/Maps/MainLevel`에서 Play를 누른다. 키보드나 마우스 입력 없이 코스, 선박, 자율주행과 캡처가 차례로 시작된다.
 2. Output Log에서 run당 `Stage5CaptureStarted`가 한 번 나타나는지 확인한다. 캡처 중에는 shared index와 실제 `time_ms`를 가진 `Stage5CapturePair`가 기록된다.
 3. 주행이 Success, Collision 또는 Timeout에 도달하면 `Stage4Terminal` 뒤 `Stage5CaptureFinalized`가 한 번 나타나는지 확인한다.
-4. 결과는 `Saved/ShipCaptures/YYYYMMDDTHHMMSSmmmZ_GUIDDIGITS`에 저장된다. 각 run에는 같은 index의 `color_*.png`, `depth_*.png`와 terminal 뒤 게시된 `manifest.json`이 있다.
+4. 결과는 `Saved/ShipCaptures/YYYYMMDDTHHMMSSmmmZ_GUIDDIGITS`에 저장된다. 각 run에는 같은 index의 `color_*.png`, `depth_*.png`, terminal 뒤 게시된 `manifest.json`, 이 파일들을 한 번에 묶은 `sequence.siv`가 있다.
 
 Success terminal의 manifest `result`는 `success`이고 Collision과 Timeout은 `fail`이다. 캡처가 시작된 뒤 terminal 전에 PIE를 중지하면 EndPlay가 run을 한 번만 마감하며 `result`는 `fail`이다. 캡처 시작 전 setup failure에는 빈 dataset이나 manifest를 만들지 않는다.
 
@@ -40,6 +40,6 @@ Success terminal의 manifest `result`는 `success`이고 Collision과 Timeout은
 - Maps & Modes의 세 설정이 `DefaultEngine.ini`와 일치한다.
 - Play 뒤 선박과 코스가 자동 생성되고 별도 입력 없이 자율주행과 캡처가 시작된다.
 - 선택한 run의 첫, 중간, 마지막 컬러와 깊이 pair가 같은 방향과 장면을 공유한다.
-- 컬러 연속 프레임의 노출이 고정되어 있고, 깊이 PNG는 가까운 물체가 밝고 5000cm 밖과 하늘이 어둡다.
-- `manifest.json`의 frame 수, 6자리 연속 index, pair 파일 수와 `time_ms`가 실제 파일과 일치한다.
+- 컬러 연속 프레임의 노출이 고정되어 있고, 깊이 PNG는 가까운 물체가 밝고 2500cm 밖과 하늘이 어둡다.
+- `manifest.json`의 frame 수, 6자리 연속 index, pair 파일 수와 `time_ms`가 실제 파일과 일치하고 `sequence.siv`가 함께 생성된다.
 - 웹 재생은 저장소 루트 `README.md`의 선택 run 복사 절차로 확인하고, 확인용 복사본만 정리한다.

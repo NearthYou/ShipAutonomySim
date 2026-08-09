@@ -794,7 +794,7 @@ private:
                 CurrentCaseIndex,
                 IntervalMs)) && bValid;
         bValid = CheckAcceptance(
-            NearCm == 0.0 && FarCm == 5000.0,
+            NearCm == 0.0 && FarCm == 2500.0,
             FString::Printf(
                 TEXT("Stage5ManifestDepthRange case=%d near=%.3f far=%.3f"),
                 CurrentCaseIndex,
@@ -855,7 +855,9 @@ private:
                 FShipCaptureAutomationAccessor::CommittedFrameCount(
                     Capture))) && bValid;
 
-        TArray<FString> ExpectedFiles{TEXT("manifest.json")};
+        TArray<FString> ExpectedFiles{
+            TEXT("manifest.json"),
+            TEXT("sequence.siv")};
         int64 PreviousTimeMs = -1;
         for (int32 ExpectedIndex = 0;
              ExpectedIndex < FrameValues->Num();

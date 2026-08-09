@@ -137,7 +137,7 @@ private:
     double DepthNearCm = 0.0;
 
     UPROPERTY(EditAnywhere, Category=Capture)
-    double DepthFarCm = 5000.0;
+    double DepthFarCm = 2500.0;
 
     UPROPERTY(Transient)
     TObjectPtr<USceneComponent> CaptureMount;
@@ -195,7 +195,11 @@ private:
         const FString& DepthFinalPath);
     bool StartCaptureAt(double WallSlideCm, double NowSeconds);
     void TickAtTime(double NowSeconds);
-    bool WriteManifest(bool bSimulationSucceeded);
+    bool SerializeManifest(
+        bool bSimulationSucceeded,
+        FString& OutJsonText);
+    bool WriteManifest(const FString& JsonText);
+    bool WriteBinaryBundle(const FString& ManifestJsonText);
     bool CleanupManifestPaths(
         const FString& ManifestTempPath,
         const FString& ManifestFinalPath);

@@ -576,16 +576,16 @@ bool FShipCaptureDepthNormalizationTest::RunTest(const FString& Parameters)
     TArray<FLinearColor> Samples{
         FLinearColor(-1.0f, 100.0f, 100.0f, 100.0f),
         FLinearColor(0.0f, 100.0f, 100.0f, 100.0f),
+        FLinearColor(1250.0f, 100.0f, 100.0f, 100.0f),
         FLinearColor(2500.0f, 100.0f, 100.0f, 100.0f),
-        FLinearColor(5000.0f, 100.0f, 100.0f, 100.0f),
-        FLinearColor(6000.0f, 100.0f, 100.0f, 100.0f),
+        FLinearColor(3000.0f, 100.0f, 100.0f, 100.0f),
         FLinearColor(std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f, 0.0f),
         FLinearColor(std::numeric_limits<float>::infinity(), 0.0f, 0.0f, 0.0f)};
     TArray64<uint8> Pixels;
 
     TestTrue(
         TEXT("Valid scene depth samples normalize"),
-        NormalizeSceneDepthToG8(Samples, Samples.Num(), 0.0, 5000.0, Pixels));
+        NormalizeSceneDepthToG8(Samples, Samples.Num(), 0.0, 2500.0, Pixels));
     TestEqual(TEXT("All samples produce pixels"), Pixels.Num(), int64{7});
     TestEqual(TEXT("Below-near depth is white"), Pixels[0], uint8{255});
     TestEqual(TEXT("Near depth is white"), Pixels[1], uint8{255});
@@ -598,7 +598,7 @@ bool FShipCaptureDepthNormalizationTest::RunTest(const FString& Parameters)
     Pixels.Add(17);
     TestFalse(
         TEXT("Pixel-count mismatch is rejected"),
-        NormalizeSceneDepthToG8(Samples, Samples.Num() - 1, 0.0, 5000.0, Pixels));
+        NormalizeSceneDepthToG8(Samples, Samples.Num() - 1, 0.0, 2500.0, Pixels));
     TestEqual(TEXT("Mismatch clears output"), Pixels.Num(), int64{0});
 
     Pixels.Add(17);
@@ -608,7 +608,7 @@ bool FShipCaptureDepthNormalizationTest::RunTest(const FString& Parameters)
             Samples,
             Samples.Num(),
             std::numeric_limits<double>::quiet_NaN(),
-            5000.0,
+            2500.0,
             Pixels));
     TestEqual(TEXT("Invalid near clears output"), Pixels.Num(), int64{0});
 
@@ -1387,6 +1387,7 @@ bool FShipCaptureManifestFinalizationTest::RunTest(
         int32 ExpectedFrameCount)
     {
         const FString ManifestPath = RunDirectory / TEXT("manifest.json");
+        const FString BundlePath = RunDirectory / TEXT("sequence.siv");
         FString JsonText;
         TSharedPtr<FJsonObject> Root;
         if (!TestTrue(
@@ -1403,6 +1404,26 @@ bool FShipCaptureManifestFinalizationTest::RunTest(
                     Root.IsValid()))
         {
             return false;
+        }
+        TArray64<uint8> BundleBytes;
+        TestTrue(
+            TEXT("Single-file bundle loads"),
+            FFileHelper::LoadFileToArray(BundleBytes, *BundlePath));
+        TestTrue(
+            TEXT("Single-file bundle has a header and payload"),
+            BundleBytes.Num() > 12);
+        constexpr ANSICHAR ExpectedBundleMagic[] = "SIVPACK1";
+        if (BundleBytes.Num() >= 8)
+        {
+            for (int32 MagicIndex = 0; MagicIndex < 8; ++MagicIndex)
+            {
+                TestEqual(
+                    *FString::Printf(
+                        TEXT("Single-file bundle magic byte %d"),
+                        MagicIndex),
+                    BundleBytes[MagicIndex],
+                    static_cast<uint8>(ExpectedBundleMagic[MagicIndex]));
+            }
         }
 
         TArray<FString> ActualTopKeys;
@@ -1450,7 +1471,7 @@ bool FShipCaptureManifestFinalizationTest::RunTest(
         TestEqual(TEXT("Manifest frame count"), FrameCount, ExpectedFrameCount);
         TestEqual(TEXT("Manifest target interval"), IntervalMs, 100);
         TestEqual(TEXT("Manifest depth near"), NearCm, 0.0);
-        TestEqual(TEXT("Manifest depth far"), FarCm, 5000.0);
+        TestEqual(TEXT("Manifest depth far"), FarCm, 2500.0);
         TestEqual(TEXT("Manifest wall slide"), SlideCm, ExpectedSlideCm);
         TestEqual(TEXT("Manifest result"), Result, ExpectedResult);
 
@@ -1671,6 +1692,10 @@ bool FShipCaptureManifestFinalizationTest::RunTest(
         TEXT("Failed manifest has no temp"),
         IFileManager::Get().FileExists(
             *(WriteFailureRunDirectory / TEXT(".manifest.json.tmp"))));
+    TestFalse(
+        TEXT("Failed manifest has no bundle"),
+        IFileManager::Get().FileExists(
+            *(WriteFailureRunDirectory / TEXT("sequence.siv"))));
     TestTrue(
         TEXT("Manifest failure preserves prior color pair"),
         IFileManager::Get().FileSize(
