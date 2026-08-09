@@ -204,6 +204,11 @@ struct FShipNavigationGameModeTestAccessor
         return GameMode.TestEnterAutonomyCallCount;
     }
 
+    static bool Stage5CaptureEnabled(const ASimGameMode& GameMode)
+    {
+        return GameMode.bStage5CaptureEnabled;
+    }
+
     static void ResetTerminalState(ASimGameMode& GameMode)
     {
         GameMode.RunResult = EShipRunResult::Running;
@@ -905,6 +910,33 @@ bool FShipGameModeOptionBootstrapTest::RunTest(const FString&)
             0);
     }
 
+    struct FCaptureOptionCase
+    {
+        const TCHAR* Label;
+        const TCHAR* Options;
+        bool bExpectedCaptureEnabled;
+    };
+    const FCaptureOptionCase CaptureCases[] = {
+        {TEXT("capture missing"), TEXT(""), true},
+        {TEXT("capture empty"), TEXT("?Stage5Capture="), true},
+        {TEXT("capture exact zero"), TEXT("?Stage5Capture=0"), false},
+        {TEXT("capture one"), TEXT("?Stage5Capture=1"), true},
+        {TEXT("capture junk"), TEXT("?Stage5Capture=junk"), true}};
+    for (const FCaptureOptionCase& Case : CaptureCases)
+    {
+        FScopedCourseTestWorld Fixture;
+        ASimGameMode* GameMode =
+            Cast<ASimGameMode>(Fixture.World->GetAuthGameMode());
+        check(GameMode != nullptr);
+        FString ErrorMessage;
+        GameMode->InitGame(TEXT("MainLevel"), Case.Options, ErrorMessage);
+        TestEqual(
+            *FString::Printf(TEXT("%s state"), Case.Label),
+            FShipNavigationGameModeTestAccessor::Stage5CaptureEnabled(
+                *GameMode),
+            Case.bExpectedCaptureEnabled);
+    }
+
     {
         FScopedCourseTestWorld Fixture;
         ASimGameMode* GameMode =
@@ -936,7 +968,9 @@ bool FShipGameModeOptionBootstrapTest::RunTest(const FString&)
         check(GameMode != nullptr);
         FString ErrorMessage;
         GameMode->InitGame(
-            TEXT("MainLevel"), TEXT("?Stage4Slide=0"), ErrorMessage);
+            TEXT("MainLevel"),
+            TEXT("?Stage4Slide=0?Stage5Capture=0"),
+            ErrorMessage);
         FShipNavigationGameModeTestAccessor::SetWaterSurfaceOverride(
             *GameMode, 75.0);
         Fixture.World->BeginPlay();
@@ -1006,7 +1040,9 @@ bool FShipGameModeTerminalRuntimeErrorTest::RunTest(const FString&)
         check(GameMode != nullptr);
         FString ErrorMessage;
         GameMode->InitGame(
-            TEXT("MainLevel"), TEXT("?Stage4Slide=0"), ErrorMessage);
+            TEXT("MainLevel"),
+            TEXT("?Stage4Slide=0?Stage5Capture=0"),
+            ErrorMessage);
         FShipNavigationGameModeTestAccessor::SetWaterSurfaceOverride(
             *GameMode, 75.0);
         Fixture.World->BeginPlay();

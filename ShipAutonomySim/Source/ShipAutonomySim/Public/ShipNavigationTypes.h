@@ -26,7 +26,8 @@ enum class EShipSetupFailure : uint8
     MeshLoadFailed,
     ShipSpawnFailed,
     PlayerControllerUnavailable,
-    AutonomyActivationFailed
+    AutonomyActivationFailed,
+    CaptureInitializationFailed
 };
 
 UENUM()

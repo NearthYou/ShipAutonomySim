@@ -8,6 +8,7 @@
 class ACourseBuilder;
 class AShipPawn;
 class UPrimitiveComponent;
+class UShipCapture;
 
 UCLASS()
 class SHIPAUTONOMYSIM_API ASimGameMode : public AGameModeBase
@@ -37,6 +38,8 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+    virtual void EndPlay(
+        const EEndPlayReason::Type EndPlayReason) override;
 
 private:
 	UPROPERTY(EditAnywhere, Category=Stage3Test)
@@ -72,8 +75,13 @@ private:
     bool bRunActive = false;
     bool bSetupFailureLogged = false;
     bool bTerminalLogged = false;
+    bool bCaptureFinalizeRequested = false;
 
     void RecordSetupFailure(EShipSetupFailure Failure);
+    bool StartRunCapture(
+        double BuildSlideCm,
+        double ResolvedSlideCm);
+    void FinalizeRunCapture(bool bSimulationSucceeded);
     void DisableNavigatorAndZeroInputs();
     void LatchTerminalResult(EShipRunResult Candidate);
     void LogTerminalOnce(EShipRunResult Result);
@@ -84,9 +92,15 @@ private:
     int32 TestSetupFailureLogCount = 0;
     int32 TestTerminalLogCount = 0;
     int32 TestRuntimeErrorLogCount = 0;
+    int32 TestCaptureStartCallCount = 0;
+    int32 TestCaptureFinalizeCallCount = 0;
+    double TestLastCaptureStartSlideCm = 0.0;
+    bool bTestLastCaptureFinalizeSuccess = false;
+    bool bStage5CaptureEnabled = true;
     bool bTestSkipStage4Orchestration = false;
     TOptional<double> TestWaterSurfaceOverrideCm;
 	friend struct FSimGameModeTestAccessor;
     friend struct FShipNavigationGameModeTestAccessor;
+    friend struct FShipCaptureGameModeTestAccessor;
 #endif
 };

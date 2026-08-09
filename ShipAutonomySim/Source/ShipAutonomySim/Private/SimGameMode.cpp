@@ -7,6 +7,8 @@
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
+#include "ShipCapture.h"
+#include "ShipCaptureSimulation.h"
 #include "ShipMovement.h"
 #include "ShipNavigationSimulation.h"
 #include "ShipNavigator.h"
@@ -59,6 +61,7 @@ void ASimGameMode::InitGame(
     bRunActive = false;
     bSetupFailureLogged = false;
     bTerminalLogged = false;
+    bCaptureFinalizeRequested = false;
     RunShip = nullptr;
     CourseBuilder = nullptr;
     CollisionActor.Reset();
@@ -68,6 +71,19 @@ void ASimGameMode::InitGame(
     TestSetupFailureLogCount = 0;
     TestTerminalLogCount = 0;
     TestRuntimeErrorLogCount = 0;
+    TestCaptureStartCallCount = 0;
+    TestCaptureFinalizeCallCount = 0;
+    TestLastCaptureStartSlideCm = 0.0;
+    bTestLastCaptureFinalizeSuccess = false;
+    bStage5CaptureEnabled = true;
+    const bool bHasStage5Capture =
+        UGameplayStatics::HasOption(Options, TEXT("Stage5Capture"));
+    const FString RawStage5Capture =
+        UGameplayStatics::ParseOption(Options, TEXT("Stage5Capture"));
+    if (bHasStage5Capture && RawStage5Capture == TEXT("0"))
+    {
+        bStage5CaptureEnabled = false;
+    }
 #endif
 
     const bool bHasSlide =
@@ -148,6 +164,15 @@ void ASimGameMode::BeginPlay()
         RecordSetupFailure(BuildFailure);
         return;
     }
+    const double ResolvedSlideCm = CourseBuilder->GetResolvedSlideCm();
+    if (!IsValidCaptureWallSlide(
+            BuildResult.SlideCm,
+            ResolvedSlideCm))
+    {
+        RecordSetupFailure(
+            EShipSetupFailure::CaptureInitializationFailed);
+        return;
+    }
     if (BuildResult.WorldPath.Num() != 3
         || !IsValid(BuildResult.StartTarget)
         || !IsValid(BuildResult.EndTarget)
@@ -189,16 +214,91 @@ void ASimGameMode::BeginPlay()
         return;
     }
 
-    UShipMovement* Movement = RunShip->FindComponentByClass<UShipMovement>();
+    if (!StartRunCapture(BuildResult.SlideCm, ResolvedSlideCm))
+    {
+        return;
+    }
+    ElapsedRunSeconds = 0.0;
+    RunResult = EShipRunResult::Running;
+}
+
+bool ASimGameMode::StartRunCapture(
+    double BuildSlideCm,
+    double ResolvedSlideCm)
+{
+    if (!IsValidCaptureWallSlide(BuildSlideCm, ResolvedSlideCm))
+    {
+        RecordSetupFailure(
+            EShipSetupFailure::CaptureInitializationFailed);
+        return false;
+    }
+    if (!IsValid(RunShip))
+    {
+        RecordSetupFailure(
+            EShipSetupFailure::CaptureInitializationFailed);
+        return false;
+    }
+
+    UShipMovement* Movement =
+        RunShip->FindComponentByClass<UShipMovement>();
     if (Movement == nullptr)
     {
         RecordSetupFailure(EShipSetupFailure::AutonomyActivationFailed);
-        return;
+        return false;
     }
     AddTickPrerequisiteComponent(Movement);
-    ElapsedRunSeconds = 0.0;
-    RunResult = EShipRunResult::Running;
+
+    bool bCaptureEnabled = true;
+#if WITH_DEV_AUTOMATION_TESTS
+    bCaptureEnabled = bStage5CaptureEnabled;
+#endif
+    if (!bCaptureEnabled)
+    {
+        bRunActive = true;
+        return true;
+    }
+
+    UShipCapture* Capture = RunShip->GetCapture();
+    if (!IsValid(Capture))
+    {
+        RecordSetupFailure(
+            EShipSetupFailure::CaptureInitializationFailed);
+        return false;
+    }
+    Capture->AddTickPrerequisiteComponent(Movement);
+    AddTickPrerequisiteComponent(Capture);
+#if WITH_DEV_AUTOMATION_TESTS
+    ++TestCaptureStartCallCount;
+    TestLastCaptureStartSlideCm = BuildSlideCm;
+#endif
+    if (!Capture->StartCapture(BuildSlideCm))
+    {
+        RecordSetupFailure(
+            EShipSetupFailure::CaptureInitializationFailed);
+        return false;
+    }
     bRunActive = true;
+    return true;
+}
+
+void ASimGameMode::FinalizeRunCapture(bool bSimulationSucceeded)
+{
+    if (bCaptureFinalizeRequested)
+    {
+        return;
+    }
+    bCaptureFinalizeRequested = true;
+#if WITH_DEV_AUTOMATION_TESTS
+    ++TestCaptureFinalizeCallCount;
+    bTestLastCaptureFinalizeSuccess = bSimulationSucceeded;
+#endif
+    if (IsValid(RunShip))
+    {
+        if (UShipCapture* Capture = RunShip->GetCapture())
+        {
+            Capture->StopAndFinalize(bSimulationSucceeded);
+        }
+    }
 }
 
 void ASimGameMode::Tick(float DeltaSeconds)
@@ -288,6 +388,7 @@ void ASimGameMode::RecordSetupFailure(EShipSetupFailure Failure)
     }
     bRunActive = false;
     DisableNavigatorAndZeroInputs();
+    FinalizeRunCapture(false);
     if (!bSetupFailureLogged)
     {
         UE_LOG(
@@ -331,6 +432,14 @@ void ASimGameMode::LatchTerminalResult(EShipRunResult Candidate)
     bRunActive = false;
     DisableNavigatorAndZeroInputs();
     LogTerminalOnce(Candidate);
+    FinalizeRunCapture(Candidate == EShipRunResult::Success);
+}
+
+void ASimGameMode::EndPlay(
+    const EEndPlayReason::Type EndPlayReason)
+{
+    FinalizeRunCapture(false);
+    Super::EndPlay(EndPlayReason);
 }
 
 void ASimGameMode::LogTerminalOnce(EShipRunResult Result)

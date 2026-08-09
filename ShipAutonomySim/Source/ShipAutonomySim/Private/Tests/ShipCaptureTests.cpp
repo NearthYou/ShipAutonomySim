@@ -15,7 +15,10 @@
 #include "Modules/ModuleManager.h"
 #include "ShipCapture.h"
 #include "ShipCaptureSimulation.h"
+#include "ShipMovement.h"
+#include "ShipNavigationTypes.h"
 #include "ShipPawn.h"
+#include "SimGameMode.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "UObject/UObjectGlobals.h"
@@ -58,6 +61,11 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     FShipCaptureManifestFinalizationTest,
     "ShipAutonomySim.ShipCapture.Manifest.Finalization",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipCaptureGameModeOrchestrationTest,
+    "ShipAutonomySim.ShipCapture.GameMode.Orchestration",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
 namespace
@@ -160,6 +168,97 @@ void FShipCaptureAutomationAccessor::SetDepthRelativeLocationForTest(
         Capture.DepthCapture->SetRelativeLocation(RelativeLocation);
     }
 }
+
+struct FShipCaptureGameModeTestAccessor
+{
+    static void SetRunShip(ASimGameMode& GameMode, AShipPawn& Pawn)
+    {
+        GameMode.RunShip = &Pawn;
+    }
+
+    static bool StartRunCapture(
+        ASimGameMode& GameMode,
+        double BuildSlideCm,
+        double ResolvedSlideCm)
+    {
+        return GameMode.StartRunCapture(BuildSlideCm, ResolvedSlideCm);
+    }
+
+    static void LatchTerminal(
+        ASimGameMode& GameMode,
+        EShipRunResult Result)
+    {
+        GameMode.LatchTerminalResult(Result);
+    }
+
+    static void InvokeEndPlay(ASimGameMode& GameMode)
+    {
+        GameMode.bTestSkipStage4Orchestration = true;
+        GameMode.DispatchBeginPlay();
+        GameMode.EndPlay(EEndPlayReason::Quit);
+    }
+
+    static bool RunActive(const ASimGameMode& GameMode)
+    {
+        return GameMode.bRunActive;
+    }
+
+    static int32 CaptureStartCallCount(const ASimGameMode& GameMode)
+    {
+        return GameMode.TestCaptureStartCallCount;
+    }
+
+    static double LastCaptureStartSlideCm(const ASimGameMode& GameMode)
+    {
+        return GameMode.TestLastCaptureStartSlideCm;
+    }
+
+    static int32 CaptureFinalizeCallCount(const ASimGameMode& GameMode)
+    {
+        return GameMode.TestCaptureFinalizeCallCount;
+    }
+
+    static bool LastCaptureFinalizeSuccess(const ASimGameMode& GameMode)
+    {
+        return GameMode.bTestLastCaptureFinalizeSuccess;
+    }
+
+    static bool HasCaptureMovementPrerequisite(
+        const AShipPawn& Pawn)
+    {
+        const UShipCapture* Capture = Pawn.GetCapture();
+        const UShipMovement* Movement =
+            Pawn.FindComponentByClass<UShipMovement>();
+        if (Capture == nullptr || Movement == nullptr)
+        {
+            return false;
+        }
+        for (const FTickPrerequisite& Prerequisite :
+             Capture->PrimaryComponentTick.GetPrerequisites())
+        {
+            if (Prerequisite.PrerequisiteObject.Get() == Movement)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static bool HasGameModePrerequisite(
+        const ASimGameMode& GameMode,
+        const UObject* Object)
+    {
+        for (const FTickPrerequisite& Prerequisite :
+             GameMode.PrimaryActorTick.GetPrerequisites())
+        {
+            if (Prerequisite.PrerequisiteObject.Get() == Object)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+};
 
 bool FShipCaptureSchedulerTest::RunTest(const FString& Parameters)
 {
@@ -1393,6 +1492,338 @@ bool FShipCaptureManifestFinalizationTest::RunTest(
     TestTrue(TEXT("Manifest run cleanup succeeds"), Cleanup.Cleanup());
     TestEqual(
         TEXT("Manifest cleanup preserves pre-existing children"),
+        FString::Join(Cleanup.DirectChildDirectories(), TEXT("|")),
+        FString::Join(Cleanup.PreExistingChildren, TEXT("|")));
+    return !HasAnyErrors();
+}
+
+bool FShipCaptureGameModeOrchestrationTest::RunTest(
+    const FString& Parameters)
+{
+    (void)Parameters;
+    AddExpectedError(
+        TEXT("Stage4SetupFailure"),
+        EAutomationExpectedErrorFlags::Contains,
+        5);
+    AddExpectedError(
+        TEXT("Stage5CaptureFailure"),
+        EAutomationExpectedErrorFlags::Contains,
+        3);
+    AddExpectedError(
+        TEXT("Stage4RuntimeCalculationError"),
+        EAutomationExpectedErrorFlags::Contains,
+        1);
+
+    FScopedAutomationCaptureCleanup Cleanup;
+    FScopedShipCaptureTestWorld TestWorld;
+    UStaticMesh* CubeMesh = LoadObject<UStaticMesh>(
+        nullptr,
+        TEXT("/Engine/BasicShapes/Cube.Cube"));
+    AStaticMeshActor* Cube = TestWorld.World->SpawnActor<AStaticMeshActor>();
+    check(CubeMesh != nullptr && Cube != nullptr);
+    Cube->GetStaticMeshComponent()->SetStaticMesh(CubeMesh);
+    Cube->SetActorLocation(FVector(600.0, 0.0, 50.0));
+    Cube->SetActorScale3D(FVector(1.0, 4.0, 4.0));
+
+    struct FRunFixture
+    {
+        ASimGameMode* GameMode = nullptr;
+        AShipPawn* Pawn = nullptr;
+        UShipCapture* Capture = nullptr;
+        UShipMovement* Movement = nullptr;
+    };
+    const auto MakeRun = [&]()
+    {
+        FRunFixture Run;
+        Run.GameMode = TestWorld.World->SpawnActor<ASimGameMode>();
+        Run.Pawn = TestWorld.World->SpawnActor<AShipPawn>();
+        check(Run.GameMode != nullptr && Run.Pawn != nullptr);
+        Run.Capture = Run.Pawn->GetCapture();
+        Run.Movement = Run.Pawn->FindComponentByClass<UShipMovement>();
+        check(Run.Capture != nullptr && Run.Movement != nullptr);
+        FShipCaptureAutomationAccessor::SetCaptureResolution(
+            *Run.Capture,
+            32);
+        FShipCaptureGameModeTestAccessor::SetRunShip(
+            *Run.GameMode,
+            *Run.Pawn);
+        return Run;
+    };
+    const auto TrackRun = [&](const UShipCapture& Capture)
+    {
+        const FString RunDirectory =
+            FShipCaptureAutomationAccessor::RunDirectory(Capture);
+        return RunDirectory.IsEmpty() || Cleanup.Track(RunDirectory);
+    };
+
+    FRunFixture ValidRun = MakeRun();
+    TestTrue(
+        TEXT("Valid wall slide starts capture"),
+        FShipCaptureGameModeTestAccessor::StartRunCapture(
+            *ValidRun.GameMode,
+            125.0,
+            125.0));
+    TestTrue(TEXT("Valid run directory is tracked"), TrackRun(*ValidRun.Capture));
+    TestEqual(
+        TEXT("Valid capture starts once"),
+        FShipCaptureGameModeTestAccessor::CaptureStartCallCount(
+            *ValidRun.GameMode),
+        1);
+    TestEqual(
+        TEXT("Build slide is passed exactly"),
+        FShipCaptureGameModeTestAccessor::LastCaptureStartSlideCm(
+            *ValidRun.GameMode),
+        125.0);
+    TestTrue(
+        TEXT("Run becomes active only after capture start"),
+        FShipCaptureGameModeTestAccessor::RunActive(*ValidRun.GameMode));
+    TestTrue(
+        TEXT("Capture waits for Movement"),
+        FShipCaptureGameModeTestAccessor::HasCaptureMovementPrerequisite(
+            *ValidRun.Pawn));
+    TestTrue(
+        TEXT("GameMode waits for Movement"),
+        FShipCaptureGameModeTestAccessor::HasGameModePrerequisite(
+            *ValidRun.GameMode,
+            ValidRun.Movement));
+    TestTrue(
+        TEXT("GameMode waits for Capture"),
+        FShipCaptureGameModeTestAccessor::HasGameModePrerequisite(
+            *ValidRun.GameMode,
+            ValidRun.Capture));
+    FShipCaptureGameModeTestAccessor::LatchTerminal(
+        *ValidRun.GameMode,
+        EShipRunResult::Success);
+    TestEqual(
+        TEXT("Success terminal result is preserved"),
+        ValidRun.GameMode->GetRunResult(),
+        EShipRunResult::Success);
+    TestEqual(
+        TEXT("Success finalizes once"),
+        FShipCaptureGameModeTestAccessor::CaptureFinalizeCallCount(
+            *ValidRun.GameMode),
+        1);
+    TestTrue(
+        TEXT("Success terminal passes success finalize"),
+        FShipCaptureGameModeTestAccessor::LastCaptureFinalizeSuccess(
+            *ValidRun.GameMode));
+    FShipCaptureGameModeTestAccessor::LatchTerminal(
+        *ValidRun.GameMode,
+        EShipRunResult::Collision);
+    TestEqual(
+        TEXT("Terminal cannot be overwritten"),
+        ValidRun.GameMode->GetRunResult(),
+        EShipRunResult::Success);
+    TestEqual(
+        TEXT("Repeated terminal does not refinalize"),
+        FShipCaptureGameModeTestAccessor::CaptureFinalizeCallCount(
+            *ValidRun.GameMode),
+        1);
+
+    struct FInvalidSlideCase
+    {
+        const TCHAR* Label;
+        double BuildSlideCm;
+        double ResolvedSlideCm;
+    };
+    const FInvalidSlideCase InvalidSlideCases[] = {
+        {TEXT("build NaN"),
+         std::numeric_limits<double>::quiet_NaN(),
+         0.0},
+        {TEXT("resolved infinity"),
+         0.0,
+         std::numeric_limits<double>::infinity()},
+        {TEXT("slide mismatch"), 0.0, 1.0001e-9}};
+    for (const FInvalidSlideCase& InvalidCase : InvalidSlideCases)
+    {
+        FRunFixture Run = MakeRun();
+        TestFalse(
+            *FString::Printf(
+                TEXT("%s rejects capture start"),
+                InvalidCase.Label),
+            FShipCaptureGameModeTestAccessor::StartRunCapture(
+                *Run.GameMode,
+                InvalidCase.BuildSlideCm,
+                InvalidCase.ResolvedSlideCm));
+        TestEqual(
+            *FString::Printf(
+                TEXT("%s records capture setup failure"),
+                InvalidCase.Label),
+            Run.GameMode->GetSetupFailure(),
+            EShipSetupFailure::CaptureInitializationFailed);
+        TestEqual(
+            *FString::Printf(
+                TEXT("%s calls no component start"),
+                InvalidCase.Label),
+            FShipCaptureGameModeTestAccessor::CaptureStartCallCount(
+                *Run.GameMode),
+            0);
+        TestFalse(
+            *FString::Printf(TEXT("%s leaves run inactive"), InvalidCase.Label),
+            FShipCaptureGameModeTestAccessor::RunActive(*Run.GameMode));
+        TestTrue(
+            *FString::Printf(
+                TEXT("%s creates no run directory"),
+                InvalidCase.Label),
+            FShipCaptureAutomationAccessor::RunDirectory(*Run.Capture)
+                .IsEmpty());
+        TestEqual(
+            *FString::Printf(
+                TEXT("%s defensively finalizes once"),
+                InvalidCase.Label),
+            FShipCaptureGameModeTestAccessor::CaptureFinalizeCallCount(
+                *Run.GameMode),
+            1);
+    }
+
+    FRunFixture RigFailureRun = MakeRun();
+    FShipCaptureAutomationAccessor::SetDepthRelativeLocationForTest(
+        *RigFailureRun.Capture,
+        FVector(1.0, 0.0, 0.0));
+    TestFalse(
+        TEXT("Rig mismatch fails capture initialization"),
+        FShipCaptureGameModeTestAccessor::StartRunCapture(
+            *RigFailureRun.GameMode,
+            0.0,
+            0.0));
+    TestEqual(
+        TEXT("Rig mismatch uses capture setup failure"),
+        RigFailureRun.GameMode->GetSetupFailure(),
+        EShipSetupFailure::CaptureInitializationFailed);
+    TestEqual(
+        TEXT("Rig mismatch calls component start once"),
+        FShipCaptureGameModeTestAccessor::CaptureStartCallCount(
+            *RigFailureRun.GameMode),
+        1);
+    TestFalse(
+        TEXT("Rig mismatch leaves run inactive"),
+        FShipCaptureGameModeTestAccessor::RunActive(
+            *RigFailureRun.GameMode));
+
+    FRunFixture FirstPairFailureRun = MakeRun();
+    FShipCaptureAutomationAccessor::SetFailurePoint(
+        *FirstPairFailureRun.Capture,
+        EShipCaptureTestFailurePoint::DepthTempWrite);
+    TestFalse(
+        TEXT("First pair failure rejects capture initialization"),
+        FShipCaptureGameModeTestAccessor::StartRunCapture(
+            *FirstPairFailureRun.GameMode,
+            0.0,
+            0.0));
+    TestTrue(
+        TEXT("First-pair failure run directory is tracked"),
+        TrackRun(*FirstPairFailureRun.Capture));
+    TestEqual(
+        TEXT("First pair failure uses capture setup failure"),
+        FirstPairFailureRun.GameMode->GetSetupFailure(),
+        EShipSetupFailure::CaptureInitializationFailed);
+    TestFalse(
+        TEXT("First pair failure leaves run inactive"),
+        FShipCaptureGameModeTestAccessor::RunActive(
+            *FirstPairFailureRun.GameMode));
+    TestFalse(
+        TEXT("First pair failure publishes no manifest"),
+        IFileManager::Get().FileExists(*(
+            FShipCaptureAutomationAccessor::RunDirectory(
+                *FirstPairFailureRun.Capture) /
+            TEXT("manifest.json"))));
+
+    for (const EShipRunResult TerminalResult : {
+             EShipRunResult::Collision,
+             EShipRunResult::Timeout})
+    {
+        FRunFixture Run = MakeRun();
+        TestTrue(
+            TEXT("Failure terminal fixture starts"),
+            FShipCaptureGameModeTestAccessor::StartRunCapture(
+                *Run.GameMode,
+                0.0,
+                0.0));
+        TestTrue(TEXT("Failure terminal run is tracked"), TrackRun(*Run.Capture));
+        FShipCaptureGameModeTestAccessor::LatchTerminal(
+            *Run.GameMode,
+            TerminalResult);
+        TestEqual(
+            TEXT("Failure terminal result is preserved"),
+            Run.GameMode->GetRunResult(),
+            TerminalResult);
+        TestEqual(
+            TEXT("Failure terminal finalizes once"),
+            FShipCaptureGameModeTestAccessor::CaptureFinalizeCallCount(
+                *Run.GameMode),
+            1);
+        TestFalse(
+            TEXT("Collision and timeout finalize fail"),
+            FShipCaptureGameModeTestAccessor::LastCaptureFinalizeSuccess(
+                *Run.GameMode));
+    }
+
+    FRunFixture RuntimeErrorRun = MakeRun();
+    TestTrue(
+        TEXT("Runtime-error fixture starts"),
+        FShipCaptureGameModeTestAccessor::StartRunCapture(
+            *RuntimeErrorRun.GameMode,
+            0.0,
+            0.0));
+    TestTrue(TEXT("Runtime-error run is tracked"), TrackRun(*RuntimeErrorRun.Capture));
+    RuntimeErrorRun.GameMode->ReportRuntimeCalculationError(
+        EShipRuntimeCalculationError::InvalidHeading);
+    TestEqual(
+        TEXT("Runtime calculation error does not finalize immediately"),
+        FShipCaptureGameModeTestAccessor::CaptureFinalizeCallCount(
+            *RuntimeErrorRun.GameMode),
+        0);
+    FShipCaptureGameModeTestAccessor::LatchTerminal(
+        *RuntimeErrorRun.GameMode,
+        EShipRunResult::Timeout);
+    TestEqual(
+        TEXT("Timeout after runtime error finalizes once"),
+        FShipCaptureGameModeTestAccessor::CaptureFinalizeCallCount(
+            *RuntimeErrorRun.GameMode),
+        1);
+    TestFalse(
+        TEXT("Runtime-error timeout finalizes fail"),
+        FShipCaptureGameModeTestAccessor::LastCaptureFinalizeSuccess(
+            *RuntimeErrorRun.GameMode));
+
+    FRunFixture CaptureErrorRun = MakeRun();
+    TestTrue(
+        TEXT("Capture-error fixture starts"),
+        FShipCaptureGameModeTestAccessor::StartRunCapture(
+            *CaptureErrorRun.GameMode,
+            0.0,
+            0.0));
+    TestTrue(TEXT("Capture-error run is tracked"), TrackRun(*CaptureErrorRun.Capture));
+    TestFalse(
+        TEXT("Injected capture runtime error fails"),
+        FShipCaptureAutomationAccessor::CaptureSingleTransaction(
+            *CaptureErrorRun.Capture,
+            1000000,
+            1.0).bSucceeded);
+    TestEqual(
+        TEXT("Capture runtime error does not finalize immediately"),
+        FShipCaptureGameModeTestAccessor::CaptureFinalizeCallCount(
+            *CaptureErrorRun.GameMode),
+        0);
+    TestEqual(
+        TEXT("Capture runtime error does not alter terminal result"),
+        CaptureErrorRun.GameMode->GetRunResult(),
+        EShipRunResult::Running);
+    FShipCaptureGameModeTestAccessor::InvokeEndPlay(
+        *CaptureErrorRun.GameMode);
+    TestEqual(
+        TEXT("EndPlay after capture error finalizes once"),
+        FShipCaptureGameModeTestAccessor::CaptureFinalizeCallCount(
+            *CaptureErrorRun.GameMode),
+        1);
+    TestFalse(
+        TEXT("EndPlay after capture error finalizes fail"),
+        FShipCaptureGameModeTestAccessor::LastCaptureFinalizeSuccess(
+            *CaptureErrorRun.GameMode));
+
+    TestTrue(TEXT("GameMode run cleanup succeeds"), Cleanup.Cleanup());
+    TestEqual(
+        TEXT("GameMode cleanup preserves pre-existing children"),
         FString::Join(Cleanup.DirectChildDirectories(), TEXT("|")),
         FString::Join(Cleanup.PreExistingChildren, TEXT("|")));
     return !HasAnyErrors();
