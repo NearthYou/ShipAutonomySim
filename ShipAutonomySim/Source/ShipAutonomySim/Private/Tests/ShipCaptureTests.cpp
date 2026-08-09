@@ -7,7 +7,9 @@
 #include "Engine/World.h"
 #include "IImageWrapperModule.h"
 #include "ImageCore.h"
+#include "HAL/FileManager.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
 #include "ShipCapture.h"
 #include "ShipCaptureSimulation.h"
@@ -39,6 +41,11 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     "ShipAutonomySim.ShipCapture.Image.ReadbackAndEncoding",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipCapturePairPublicationTest,
+    "ShipAutonomySim.ShipCapture.File.PairPublication",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
 namespace
 {
 class FScopedShipCaptureTestWorld
@@ -56,6 +63,77 @@ public:
     }
 
     UWorld* World = nullptr;
+};
+
+class FScopedAutomationCaptureCleanup
+{
+public:
+    FScopedAutomationCaptureCleanup()
+    {
+        AutomationRoot = FPaths::ConvertRelativePathToFull(
+            FPaths::ProjectSavedDir() /
+            TEXT("ShipCaptures/Automation"));
+        FPaths::NormalizeDirectoryName(AutomationRoot);
+        PreExistingChildren = DirectChildDirectories();
+    }
+
+    ~FScopedAutomationCaptureCleanup()
+    {
+        if (!bCleanupAttempted)
+        {
+            Cleanup();
+        }
+    }
+
+    TArray<FString> DirectChildDirectories() const
+    {
+        TArray<FString> Children;
+        IFileManager::Get().FindFiles(
+            Children,
+            *(AutomationRoot / TEXT("*")),
+            false,
+            true);
+        Children.Sort();
+        return Children;
+    }
+
+    bool Track(const FString& RunDirectory)
+    {
+        FString FullRunDirectory =
+            FPaths::ConvertRelativePathToFull(RunDirectory);
+        FPaths::NormalizeDirectoryName(FullRunDirectory);
+        FString ParentDirectory = FPaths::GetPath(FullRunDirectory);
+        FPaths::NormalizeDirectoryName(ParentDirectory);
+        const FString LeafName = FPaths::GetCleanFilename(FullRunDirectory);
+        if (ParentDirectory != AutomationRoot ||
+            PreExistingChildren.Contains(LeafName))
+        {
+            return false;
+        }
+        CreatedRunDirectories.AddUnique(FullRunDirectory);
+        return true;
+    }
+
+    bool Cleanup()
+    {
+        bCleanupAttempted = true;
+        bool bAllDeleted = true;
+        for (const FString& RunDirectory : CreatedRunDirectories)
+        {
+            bAllDeleted = IFileManager::Get().DeleteDirectory(
+                *RunDirectory,
+                true,
+                true) && bAllDeleted;
+        }
+        return bAllDeleted;
+    }
+
+    FString AutomationRoot;
+    TArray<FString> PreExistingChildren;
+
+private:
+    TArray<FString> CreatedRunDirectories;
+    bool bCleanupAttempted = false;
 };
 }
 
@@ -576,6 +654,215 @@ bool FShipCaptureReadbackAndEncodingTest::RunTest(const FString& Parameters)
             DepthPixels[16 * 32 + 16] > DepthPixels[0]);
     }
 
+    return !HasAnyErrors();
+}
+
+bool FShipCapturePairPublicationTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+
+    FScopedAutomationCaptureCleanup Cleanup;
+    FScopedShipCaptureTestWorld TestWorld;
+    UStaticMesh* CubeMesh = LoadObject<UStaticMesh>(
+        nullptr,
+        TEXT("/Engine/BasicShapes/Cube.Cube"));
+    AStaticMeshActor* Cube = TestWorld.World->SpawnActor<AStaticMeshActor>();
+    TestNotNull(TEXT("Pair test cube mesh loads"), CubeMesh);
+    TestNotNull(TEXT("Pair test cube spawns"), Cube);
+    if (CubeMesh == nullptr || Cube == nullptr)
+    {
+        return false;
+    }
+    Cube->GetStaticMeshComponent()->SetStaticMesh(CubeMesh);
+    Cube->SetActorLocation(FVector(600.0, 0.0, 50.0));
+    Cube->SetActorScale3D(FVector(1.0, 4.0, 4.0));
+
+    AShipPawn* ValidPawn = TestWorld.World->SpawnActor<AShipPawn>();
+    check(ValidPawn != nullptr && ValidPawn->GetCapture() != nullptr);
+    UShipCapture& ValidCapture = *ValidPawn->GetCapture();
+    FShipCaptureAutomationAccessor::SetCaptureResolution(ValidCapture, 32);
+    TestTrue(
+        TEXT("Valid frame zero publishes"),
+        FShipCaptureAutomationAccessor::StartCaptureAt(
+            ValidCapture,
+            0.0,
+            100.0));
+    const FString ValidRunDirectory =
+        FShipCaptureAutomationAccessor::RunDirectory(ValidCapture);
+    TestTrue(
+        TEXT("Valid run is an owned direct Automation child"),
+        Cleanup.Track(ValidRunDirectory));
+    const TArray<FString> ChildrenAfterValid =
+        Cleanup.DirectChildDirectories();
+    TestEqual(
+        TEXT("Valid start creates one unique direct child"),
+        ChildrenAfterValid.Num(),
+        Cleanup.PreExistingChildren.Num() + 1);
+    TestFalse(
+        TEXT("Color temp is not published"),
+        IFileManager::Get().FileExists(
+            *(ValidRunDirectory / TEXT(".color_000000.png.tmp"))));
+    TestFalse(
+        TEXT("Depth temp is not published"),
+        IFileManager::Get().FileExists(
+            *(ValidRunDirectory / TEXT(".depth_000000.png.tmp"))));
+    const FString ValidColor =
+        ValidRunDirectory / TEXT("color_000000.png");
+    const FString ValidDepth =
+        ValidRunDirectory / TEXT("depth_000000.png");
+    TestTrue(
+        TEXT("Color final exists with bytes"),
+        IFileManager::Get().FileExists(*ValidColor) &&
+            IFileManager::Get().FileSize(*ValidColor) > 0);
+    TestTrue(
+        TEXT("Depth final exists with bytes"),
+        IFileManager::Get().FileExists(*ValidDepth) &&
+            IFileManager::Get().FileSize(*ValidDepth) > 0);
+    TestEqual(
+        TEXT("Valid pair commits one record"),
+        FShipCaptureAutomationAccessor::CommittedFrameCount(ValidCapture),
+        1);
+    ValidCapture.StopAndFinalize(false);
+
+    struct FFailureCase
+    {
+        const TCHAR* Label;
+        EShipCaptureTestFailurePoint FailurePoint;
+    };
+    const FFailureCase FailureCases[] = {
+        {TEXT("depth temp write"),
+         EShipCaptureTestFailurePoint::DepthTempWrite},
+        {TEXT("depth frame rename"),
+         EShipCaptureTestFailurePoint::DepthFrameRename}};
+    for (const FFailureCase& FailureCase : FailureCases)
+    {
+        AShipPawn* FailurePawn = TestWorld.World->SpawnActor<AShipPawn>();
+        check(FailurePawn != nullptr && FailurePawn->GetCapture() != nullptr);
+        UShipCapture& FailureCapture = *FailurePawn->GetCapture();
+        FShipCaptureAutomationAccessor::SetCaptureResolution(
+            FailureCapture,
+            32);
+        FShipCaptureAutomationAccessor::SetFailurePoint(
+            FailureCapture,
+            FailureCase.FailurePoint);
+        TestFalse(
+            *FString::Printf(TEXT("%s rejects frame zero"), FailureCase.Label),
+            FShipCaptureAutomationAccessor::StartCaptureAt(
+                FailureCapture,
+                0.0,
+                200.0));
+        const FString FailureRunDirectory =
+            FShipCaptureAutomationAccessor::RunDirectory(FailureCapture);
+        TestTrue(
+            *FString::Printf(TEXT("%s run is tracked"), FailureCase.Label),
+            Cleanup.Track(FailureRunDirectory));
+        for (const TCHAR* LeafName : {
+                 TEXT("color_000000.png"),
+                 TEXT("depth_000000.png"),
+                 TEXT(".color_000000.png.tmp"),
+                 TEXT(".depth_000000.png.tmp")})
+        {
+            TestFalse(
+                *FString::Printf(
+                    TEXT("%s cleans %s"),
+                    FailureCase.Label,
+                    LeafName),
+                IFileManager::Get().FileExists(
+                    *(FailureRunDirectory / LeafName)));
+        }
+        TestEqual(
+            *FString::Printf(
+                TEXT("%s commits no record or next index"),
+                FailureCase.Label),
+            FShipCaptureAutomationAccessor::CommittedFrameCount(
+                FailureCapture),
+            0);
+    }
+
+    AShipPawn* PriorFramePawn = TestWorld.World->SpawnActor<AShipPawn>();
+    check(PriorFramePawn != nullptr && PriorFramePawn->GetCapture() != nullptr);
+    UShipCapture& PriorFrameCapture = *PriorFramePawn->GetCapture();
+    FShipCaptureAutomationAccessor::SetCaptureResolution(
+        PriorFrameCapture,
+        32);
+    TestTrue(
+        TEXT("Prior-frame case commits frame zero"),
+        FShipCaptureAutomationAccessor::StartCaptureAt(
+            PriorFrameCapture,
+            0.0,
+            300.0));
+    const FString PriorRunDirectory =
+        FShipCaptureAutomationAccessor::RunDirectory(PriorFrameCapture);
+    TestTrue(TEXT("Prior-frame run is tracked"), Cleanup.Track(PriorRunDirectory));
+    FShipCaptureAutomationAccessor::SetFailurePoint(
+        PriorFrameCapture,
+        EShipCaptureTestFailurePoint::DepthFrameRename);
+    FShipCaptureAutomationAccessor::TickAt(PriorFrameCapture, 300.1);
+    TestTrue(
+        TEXT("Prior color frame zero remains"),
+        IFileManager::Get().FileSize(
+            *(PriorRunDirectory / TEXT("color_000000.png"))) > 0);
+    TestTrue(
+        TEXT("Prior depth frame zero remains"),
+        IFileManager::Get().FileSize(
+            *(PriorRunDirectory / TEXT("depth_000000.png"))) > 0);
+    for (const TCHAR* LeafName : {
+             TEXT("color_000001.png"),
+             TEXT("depth_000001.png"),
+             TEXT(".color_000001.png.tmp"),
+             TEXT(".depth_000001.png.tmp")})
+    {
+        TestFalse(
+            *FString::Printf(TEXT("Failed frame one cleans %s"), LeafName),
+            IFileManager::Get().FileExists(*(PriorRunDirectory / LeafName)));
+    }
+    TestEqual(
+        TEXT("Frame one failure preserves only one committed record"),
+        FShipCaptureAutomationAccessor::CommittedFrameCount(
+            PriorFrameCapture),
+        1);
+
+    AShipPawn* BoundaryPawn = TestWorld.World->SpawnActor<AShipPawn>();
+    check(BoundaryPawn != nullptr && BoundaryPawn->GetCapture() != nullptr);
+    UShipCapture& BoundaryCapture = *BoundaryPawn->GetCapture();
+    FShipCaptureAutomationAccessor::SetCaptureResolution(BoundaryCapture, 32);
+    TestTrue(
+        TEXT("Boundary rig sets up"),
+        FShipCaptureAutomationAccessor::SetupRigOnly(*BoundaryPawn)
+            .bSetupSucceeded);
+    TestTrue(
+        TEXT("Index 999999 captures and encodes"),
+        FShipCaptureAutomationAccessor::CaptureSingleTransaction(
+            BoundaryCapture,
+            999999,
+            999.999).bSucceeded);
+    TestFalse(
+        TEXT("Index 1000000 latches capture failure"),
+        FShipCaptureAutomationAccessor::CaptureSingleTransaction(
+            BoundaryCapture,
+            1000000,
+            1000.0).bSucceeded);
+    for (const FString& RunDirectory : {
+             ValidRunDirectory,
+             PriorRunDirectory})
+    {
+        TestFalse(
+            TEXT("No seven-digit color name is published"),
+            IFileManager::Get().FileExists(
+                *(RunDirectory / TEXT("color_1000000.png"))));
+        TestFalse(
+            TEXT("No seven-digit depth name is published"),
+            IFileManager::Get().FileExists(
+                *(RunDirectory / TEXT("depth_1000000.png"))));
+    }
+
+    TestTrue(
+        TEXT("Only exact owned run directories are removed"),
+        Cleanup.Cleanup());
+    TestEqual(
+        TEXT("Pre-existing Automation children are preserved"),
+        FString::Join(Cleanup.DirectChildDirectories(), TEXT("|")),
+        FString::Join(Cleanup.PreExistingChildren, TEXT("|")));
     return !HasAnyErrors();
 }
 #endif

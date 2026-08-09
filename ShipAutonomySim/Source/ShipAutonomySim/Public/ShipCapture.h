@@ -18,6 +18,14 @@ struct FShipCaptureFrameRecord
 };
 
 #if WITH_DEV_AUTOMATION_TESTS
+enum class EShipCaptureTestFailurePoint : uint8
+{
+    None,
+    DepthTempWrite,
+    DepthFrameRename,
+    ManifestTempWrite
+};
+
 struct FShipCaptureRigSnapshot
 {
     bool bSetupSucceeded = false;
@@ -97,7 +105,14 @@ private:
         Readback,
         PixelCount,
         DepthNormalization,
-        PngEncode
+        PngEncode,
+        DirectoryCreate,
+        PathCollision,
+        TempWrite,
+        FrameRename,
+        PairCleanup,
+        FrameRecord,
+        InvalidClock
     };
 
     UPROPERTY(EditAnywhere, Category=Capture)
@@ -142,6 +157,12 @@ private:
     EShipCaptureFailureCategory FirstFailureCategory =
         EShipCaptureFailureCategory::None;
     int32 FirstFailureFrameIndex = INDEX_NONE;
+    FString RunDirectoryPath;
+    FString RunRelativePath;
+    TArray<FShipCaptureFrameRecord> Frames;
+    int32 NextFrameIndex = 0;
+    double FirstCaptureSeconds = 0.0;
+    bool bPairCleanupFailureLatched = false;
 
     bool SetupCaptureRig();
     bool HasOpticalEquality() const;
@@ -153,8 +174,22 @@ private:
     bool LatchCaptureFailure(
         EShipCaptureFailureCategory FailureCategory,
         int32 FrameIndex);
+    bool CreateUniqueRunDirectory();
+    bool CaptureEncodeAndPublishFrame(
+        int32 FrameIndex,
+        double CaptureSeconds,
+        int64 CaptureTimeMs);
+    bool CleanupPairPaths(
+        const FString& ColorTempPath,
+        const FString& DepthTempPath,
+        const FString& ColorFinalPath,
+        const FString& DepthFinalPath);
+    bool StartCaptureAt(double WallSlideCm, double NowSeconds);
+    void TickAtTime(double NowSeconds);
 
 #if WITH_DEV_AUTOMATION_TESTS
+    EShipCaptureTestFailurePoint TestFailurePoint =
+        EShipCaptureTestFailurePoint::None;
     int32 TestColorCaptureSceneCallCount = 0;
     int32 TestDepthCaptureSceneCallCount = 0;
     int64 TestColorReadbackPixelCount = 0;
@@ -172,9 +207,19 @@ struct FShipCaptureAutomationAccessor
     static void SetDepthRelativeLocationForTest(
         UShipCapture& Capture,
         const FVector& RelativeLocation);
+    static void SetFailurePoint(
+        UShipCapture& Capture,
+        EShipCaptureTestFailurePoint FailurePoint);
     static FShipCaptureTransactionSnapshot CaptureSingleTransaction(
         UShipCapture& Capture,
         int32 FrameIndex,
         double CaptureSeconds);
+    static bool StartCaptureAt(
+        UShipCapture& Capture,
+        double WallSlideCm,
+        double NowSeconds);
+    static void TickAt(UShipCapture& Capture, double NowSeconds);
+    static FString RunDirectory(const UShipCapture& Capture);
+    static int32 CommittedFrameCount(const UShipCapture& Capture);
 };
 #endif

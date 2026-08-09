@@ -3,8 +3,15 @@
 #include "Components/SceneCaptureComponent2D.h"
 #include "Components/SceneComponent.h"
 #include "Engine/TextureRenderTarget2D.h"
+#include "HAL/FileManager.h"
+#include "HAL/PlatformTime.h"
 #include "IImageWrapperModule.h"
 #include "ImageCore.h"
+#include "CoreGlobals.h"
+#include "Misc/DateTime.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Guid.h"
+#include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
 #include "ShipPawn.h"
 #include "ShipCaptureSimulation.h"
@@ -107,19 +114,293 @@ bool UShipCapture::SetupCaptureRig()
 
 bool UShipCapture::StartCapture(double WallSlideCm)
 {
-    if (LifecycleState != EShipCaptureLifecycleState::NotStarted ||
-        !FMath::IsFinite(WallSlideCm) ||
+    return StartCaptureAt(WallSlideCm, FPlatformTime::Seconds());
+}
+
+bool UShipCapture::CreateUniqueRunDirectory()
+{
+    FString RootDirectory =
+        FPaths::ProjectSavedDir() / TEXT("ShipCaptures");
+    FString RelativeRoot = TEXT("ShipCaptures");
+#if WITH_DEV_AUTOMATION_TESTS
+    if (GIsAutomationTesting)
+    {
+        RootDirectory /= TEXT("Automation");
+        RelativeRoot /= TEXT("Automation");
+    }
+#endif
+    FPaths::NormalizeDirectoryName(RootDirectory);
+    if (!IFileManager::Get().MakeDirectory(*RootDirectory, true))
+    {
+        return LatchCaptureFailure(
+            EShipCaptureFailureCategory::DirectoryCreate,
+            NextFrameIndex);
+    }
+
+    const FString RunLeafName = FString::Printf(
+        TEXT("%s_%s"),
+        *FDateTime::UtcNow().ToString(TEXT("%Y%m%dT%H%M%S%sZ")),
+        *FGuid::NewGuid().ToString(EGuidFormats::Digits));
+    const FString CandidateRunDirectory = RootDirectory / RunLeafName;
+    if (IFileManager::Get().DirectoryExists(*CandidateRunDirectory) ||
+        IFileManager::Get().FileExists(*CandidateRunDirectory))
+    {
+        return LatchCaptureFailure(
+            EShipCaptureFailureCategory::PathCollision,
+            NextFrameIndex);
+    }
+    if (!IFileManager::Get().MakeDirectory(
+            *CandidateRunDirectory,
+            false))
+    {
+        return LatchCaptureFailure(
+            EShipCaptureFailureCategory::DirectoryCreate,
+            NextFrameIndex);
+    }
+
+    RunDirectoryPath = CandidateRunDirectory;
+    FPaths::NormalizeDirectoryName(RunDirectoryPath);
+    RunRelativePath = RelativeRoot / RunLeafName;
+    FPaths::NormalizeFilename(RunRelativePath);
+    return true;
+}
+
+bool UShipCapture::StartCaptureAt(
+    double WallSlideCm,
+    double NowSeconds)
+{
+    if (LifecycleState != EShipCaptureLifecycleState::NotStarted)
+    {
+        return false;
+    }
+    if (!FMath::IsFinite(WallSlideCm) ||
+        !FMath::IsFinite(NowSeconds) ||
         !SetupCaptureRig())
     {
-        bCaptureFailureLatched = true;
-        LifecycleState = EShipCaptureLifecycleState::CaptureFailed;
-        SetComponentTickEnabled(false);
+        return LatchCaptureFailure(
+            EShipCaptureFailureCategory::InvalidConfiguration,
+            NextFrameIndex);
+    }
+    FirstCaptureSeconds = NowSeconds;
+    if (!CreateUniqueRunDirectory() ||
+        !CaptureEncodeAndPublishFrame(0, 0.0, 0))
+    {
         return false;
     }
 
     LifecycleState = EShipCaptureLifecycleState::Capturing;
     SetComponentTickEnabled(true);
     return true;
+}
+
+bool UShipCapture::CleanupPairPaths(
+    const FString& ColorTempPath,
+    const FString& DepthTempPath,
+    const FString& ColorFinalPath,
+    const FString& DepthFinalPath)
+{
+    bool bCleanupSucceeded = true;
+    for (const FString* Path : {
+             &ColorTempPath,
+             &DepthTempPath,
+             &ColorFinalPath,
+             &DepthFinalPath})
+    {
+        if (IFileManager::Get().FileExists(**Path) &&
+            !IFileManager::Get().Delete(**Path, true, false, true))
+        {
+            bCleanupSucceeded = false;
+        }
+    }
+    if (!bCleanupSucceeded)
+    {
+        bPairCleanupFailureLatched = true;
+        if (!bCaptureFailureLatched)
+        {
+            LatchCaptureFailure(
+                EShipCaptureFailureCategory::PairCleanup,
+                NextFrameIndex);
+        }
+    }
+    return bCleanupSucceeded;
+}
+
+bool UShipCapture::CaptureEncodeAndPublishFrame(
+    int32 FrameIndex,
+    double CaptureSeconds,
+    int64 CaptureTimeMs)
+{
+    if (FrameIndex != NextFrameIndex ||
+        !FMath::IsFinite(CaptureSeconds) ||
+        CaptureSeconds < 0.0 ||
+        CaptureTimeMs < 0 ||
+        RunDirectoryPath.IsEmpty())
+    {
+        return LatchCaptureFailure(
+            EShipCaptureFailureCategory::FrameRecord,
+            FrameIndex);
+    }
+
+    FString ColorLeafName;
+    FString DepthLeafName;
+    if (!MakeCaptureFrameLeafNames(
+            FrameIndex,
+            ColorLeafName,
+            DepthLeafName))
+    {
+        return LatchCaptureFailure(
+            EShipCaptureFailureCategory::FrameRecord,
+            FrameIndex);
+    }
+    const FString ColorTempPath =
+        RunDirectoryPath /
+        FString::Printf(TEXT(".%s.tmp"), *ColorLeafName);
+    const FString DepthTempPath =
+        RunDirectoryPath /
+        FString::Printf(TEXT(".%s.tmp"), *DepthLeafName);
+    const FString ColorFinalPath = RunDirectoryPath / ColorLeafName;
+    const FString DepthFinalPath = RunDirectoryPath / DepthLeafName;
+    for (const FString* Path : {
+             &ColorTempPath,
+             &DepthTempPath,
+             &ColorFinalPath,
+             &DepthFinalPath})
+    {
+        if (IFileManager::Get().FileExists(**Path) ||
+            IFileManager::Get().DirectoryExists(**Path))
+        {
+            return LatchCaptureFailure(
+                EShipCaptureFailureCategory::PathCollision,
+                FrameIndex);
+        }
+    }
+
+    TArray64<uint8> ColorPngBytes;
+    TArray64<uint8> DepthPngBytes;
+    if (!CaptureAndEncodePair(
+            FrameIndex,
+            CaptureSeconds,
+            ColorPngBytes,
+            DepthPngBytes))
+    {
+        return false;
+    }
+
+    const bool bColorTempWritten = FFileHelper::SaveArrayToFile(
+        ColorPngBytes,
+        *ColorTempPath);
+    bool bDepthTempWritten = false;
+#if WITH_DEV_AUTOMATION_TESTS
+    if (TestFailurePoint !=
+        EShipCaptureTestFailurePoint::DepthTempWrite)
+#endif
+    {
+        bDepthTempWritten = FFileHelper::SaveArrayToFile(
+            DepthPngBytes,
+            *DepthTempPath);
+    }
+    if (!bColorTempWritten ||
+        !bDepthTempWritten ||
+        !IFileManager::Get().FileExists(*ColorTempPath) ||
+        !IFileManager::Get().FileExists(*DepthTempPath) ||
+        IFileManager::Get().FileSize(*ColorTempPath) <= 0 ||
+        IFileManager::Get().FileSize(*DepthTempPath) <= 0)
+    {
+        LatchCaptureFailure(
+            EShipCaptureFailureCategory::TempWrite,
+            FrameIndex);
+        CleanupPairPaths(
+            ColorTempPath,
+            DepthTempPath,
+            ColorFinalPath,
+            DepthFinalPath);
+        return false;
+    }
+
+    const bool bColorRenamed = IFileManager::Get().Move(
+        *ColorFinalPath,
+        *ColorTempPath,
+        false,
+        false,
+        false,
+        true);
+    bool bDepthRenamed = false;
+#if WITH_DEV_AUTOMATION_TESTS
+    if (TestFailurePoint !=
+        EShipCaptureTestFailurePoint::DepthFrameRename)
+#endif
+    {
+        bDepthRenamed = IFileManager::Get().Move(
+            *DepthFinalPath,
+            *DepthTempPath,
+            false,
+            false,
+            false,
+            true);
+    }
+    if (!bColorRenamed ||
+        !bDepthRenamed ||
+        !IFileManager::Get().FileExists(*ColorFinalPath) ||
+        !IFileManager::Get().FileExists(*DepthFinalPath) ||
+        IFileManager::Get().FileSize(*ColorFinalPath) <= 0 ||
+        IFileManager::Get().FileSize(*DepthFinalPath) <= 0)
+    {
+        LatchCaptureFailure(
+            EShipCaptureFailureCategory::FrameRename,
+            FrameIndex);
+        CleanupPairPaths(
+            ColorTempPath,
+            DepthTempPath,
+            ColorFinalPath,
+            DepthFinalPath);
+        return false;
+    }
+
+    const FShipCaptureFrameRecord Candidate{
+        FrameIndex,
+        ColorLeafName,
+        DepthLeafName,
+        CaptureTimeMs};
+    if (!ValidateAndAppendCaptureFrame(Candidate, Frames))
+    {
+        LatchCaptureFailure(
+            EShipCaptureFailureCategory::FrameRecord,
+            FrameIndex);
+        CleanupPairPaths(
+            ColorTempPath,
+            DepthTempPath,
+            ColorFinalPath,
+            DepthFinalPath);
+        return false;
+    }
+    NextFrameIndex = Frames.Num();
+    return true;
+}
+
+void UShipCapture::TickAtTime(double NowSeconds)
+{
+    if (LifecycleState != EShipCaptureLifecycleState::Capturing)
+    {
+        return;
+    }
+    const double CaptureSeconds = NowSeconds - FirstCaptureSeconds;
+    const double CaptureMilliseconds = CaptureSeconds * 1000.0;
+    if (!FMath::IsFinite(NowSeconds) ||
+        !FMath::IsFinite(CaptureSeconds) ||
+        !FMath::IsFinite(CaptureMilliseconds) ||
+        CaptureSeconds < 0.0 ||
+        CaptureMilliseconds >
+            static_cast<double>(TNumericLimits<int64>::Max()))
+    {
+        LatchCaptureFailure(
+            EShipCaptureFailureCategory::InvalidClock,
+            NextFrameIndex);
+        return;
+    }
+    CaptureEncodeAndPublishFrame(
+        NextFrameIndex,
+        CaptureSeconds,
+        FMath::RoundToInt64(CaptureMilliseconds));
 }
 
 bool UShipCapture::HasOpticalEquality() const
@@ -438,6 +719,13 @@ void FShipCaptureAutomationAccessor::SetCaptureResolution(
     }
 }
 
+void FShipCaptureAutomationAccessor::SetFailurePoint(
+    UShipCapture& Capture,
+    EShipCaptureTestFailurePoint FailurePoint)
+{
+    Capture.TestFailurePoint = FailurePoint;
+}
+
 FShipCaptureTransactionSnapshot
 FShipCaptureAutomationAccessor::CaptureSingleTransaction(
     UShipCapture& Capture,
@@ -466,5 +754,32 @@ FShipCaptureAutomationAccessor::CaptureSingleTransaction(
         Capture.TestDepthReadbackPixelCount;
     Snapshot.RawDepthSamples = Capture.TestRawDepthSamples;
     return Snapshot;
+}
+
+bool FShipCaptureAutomationAccessor::StartCaptureAt(
+    UShipCapture& Capture,
+    double WallSlideCm,
+    double NowSeconds)
+{
+    return Capture.StartCaptureAt(WallSlideCm, NowSeconds);
+}
+
+void FShipCaptureAutomationAccessor::TickAt(
+    UShipCapture& Capture,
+    double NowSeconds)
+{
+    Capture.TickAtTime(NowSeconds);
+}
+
+FString FShipCaptureAutomationAccessor::RunDirectory(
+    const UShipCapture& Capture)
+{
+    return Capture.RunDirectoryPath;
+}
+
+int32 FShipCaptureAutomationAccessor::CommittedFrameCount(
+    const UShipCapture& Capture)
+{
+    return Capture.Frames.Num();
 }
 #endif
