@@ -530,6 +530,28 @@ private:
             return false;
         }
 
+        if (!bInitialFreshLoadRequested)
+        {
+            PreviousWorldId = World->GetUniqueID();
+            PreviousWorldIdentity = World;
+            bInitialFreshLoadRequested = true;
+            const FString Options = IsCaptureOnPhase()
+                ? FString::Printf(
+                    TEXT("Stage4Slide=%.0f"),
+                    CurrentExpectedSlide())
+                : FString::Printf(
+                    TEXT("Stage4Slide=%.0f?Stage5Capture=0"),
+                    CurrentExpectedSlide());
+            WorldLoadDeadlineSeconds = FPlatformTime::Seconds() + 15.0;
+            UGameplayStatics::OpenLevel(
+                World,
+                FName(TEXT("/Game/Maps/MainLevel")),
+                true,
+                Options);
+            CurrentWorld.Reset();
+            return false;
+        }
+
         ASimGameMode* GameMode = World->GetAuthGameMode<ASimGameMode>();
         if (!IsValid(GameMode))
         {
@@ -1716,6 +1738,15 @@ private:
                     && Results[Index].MinimumWallDistanceCm > 0.0
                     && Results[Index].MinimumWallDistanceCm
                         < TNumericLimits<double>::Max());
+            if (!bExpectedCaptureOn)
+            {
+                Test->TestTrue(
+                    *FString::Printf(
+                        TEXT("capture-off plausible wall distance case %d"),
+                        Index),
+                    Results[Index].MinimumWallDistanceCm >= 100.0
+                        && Results[Index].MinimumWallDistanceCm <= 250.0);
+            }
             if (bExpectedCaptureOn)
             {
                 Test->TestTrue(
@@ -1787,6 +1818,7 @@ private:
     EStage5ValidationPhase ValidationPhase =
         EStage5ValidationPhase::RegressionCaptureOff;
     int32 CurrentCaseIndex = 0;
+    bool bInitialFreshLoadRequested = false;
     int32 PreviousWorldId = INDEX_NONE;
     TWeakObjectPtr<UWorld> PreviousWorldIdentity;
     TWeakObjectPtr<UWorld> CurrentWorld;
