@@ -6,7 +6,7 @@
 
 | 표기 | 의미 |
 | --- | --- |
-| 현재 코드 | 기준 SHA `6b2d756c3d28496ce0d144c1e0dcd2a3f194f257`에서 직접 확인한 구현 |
+| 현재 코드 | 제품 코드 기준 SHA `f481f5f0985970ce56b40a4432e657e0c5e6eb9d`에서 직접 확인한 구현 |
 | 기존 측정 | 기존 로컬 Automation 로그에서 확인하고 관련 소스의 변경 여부를 Git 이력과 대조한 측정값. 정확한 실행 SHA가 별도로 입증된 묶음에만 SHA를 적으며, 그 외 로그의 SHA는 추정하지 않음. `Saved` 아래 로그는 제출 대상이 아님 |
 | Stage 6 확인 | 이 문서를 만들면서 같은 체크아웃에서 새로 실행한 명령의 결과 |
 | 전달받은 수동 확인 | 사람이 확인했다고 전달한 범위. Stage 6에서 다시 수행한 것으로 쓰지 않음 |
@@ -25,7 +25,7 @@
 | `AShipPawn` | 200 x 100 x 100cm 충돌 상자, 단순 시각 mesh, Movement, Navigator, Capture rig, PIE 관찰용 CameraBoom을 소유한다. 자율주행 진입 때 수동 입력을 잠그고 Navigator를 연결한다. | [ShipPawn.h:45-83](ShipAutonomySim/Source/ShipAutonomySim/Public/ShipPawn.h#L45-L83), [ShipPawn.cpp:31-91](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipPawn.cpp#L31-L91), [ShipPawn.cpp:188-237](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipPawn.cpp#L188-L237) |
 | `UShipNavigator` | actor transform을 쓰지 않고, 현재 위치와 heading에서 progress, lookahead, steer, throttle, coast를 계산해 `UShipMovement`의 두 입력 setter만 호출한다. | [ShipNavigator.h:17-25](ShipAutonomySim/Source/ShipAutonomySim/Public/ShipNavigator.h#L17-L25), [ShipNavigator.cpp:145-284](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipNavigator.cpp#L145-L284) |
 | `UShipMovement` | signed forward speed와 yaw를 고정 스텝으로 적분하고, Water 높이와 normal을 조회한 다음 sweep을 켠 단일 actor transform 쓰기 경로를 실행한다. | [ShipMovementSimulation.cpp:59-105](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipMovementSimulation.cpp#L59-L105), [ShipMovement.cpp:242-308](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipMovement.cpp#L242-L308), [ShipMovement.cpp:363-387](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipMovement.cpp#L363-L387) |
-| `UShipCapture` | 실제 시계로 due를 판정하고, 공통 optical rig의 컬러와 깊이를 차례로 캡처해 PNG pair와 manifest를 게시한다. 실패 원인과 finalize를 latch한다. | [ShipCapture.h:65-87](ShipAutonomySim/Source/ShipAutonomySim/Public/ShipCapture.h#L65-L87), [ShipCapture.cpp:569-688](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipCapture.cpp#L569-L688), [ShipCapture.cpp:724-890](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipCapture.cpp#L724-L890) |
+| `UShipCapture` | 실제 시계로 due를 판정하고 공통 optical rig의 컬러와 깊이를 차례로 캡처한다. 완전한 PNG pair와 manifest를 필수 결과로 게시한 뒤 파생 `sequence.siv`를 추가한다. 실패 원인과 finalize를 latch한다. | [ShipCapture.h](ShipAutonomySim/Source/ShipAutonomySim/Public/ShipCapture.h), [ShipCapture.cpp](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipCapture.cpp), [ShipCaptureBundle.cpp](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipCaptureBundle.cpp) |
 
 ### 한 실행의 호출 순서
 
@@ -40,7 +40,7 @@
 
 ### 웹 뷰어 데이터 흐름
 
-`src/app.ts`가 루트 `manifest.json`을 읽고, `src/manifest.ts`가 공통 계약을 검증한다. `src/preload.ts`가 각 index의 color와 depth를 모두 선로딩한 뒤 `src/player.ts`가 재생 index를 관리한다. 프레임이 바뀌면 `src/app.ts`가 두 offscreen buffer를 준비하고 두 canvas를 같은 index로 반영한다. 깊이 colormap은 `src/depth.ts`가 8비트 밝기를 색으로 바꾼다. [app.ts:221-302](src/app.ts#L221-L302), [app.ts:308-365](src/app.ts#L308-L365), [manifest.ts:97-162](src/manifest.ts#L97-L162), [preload.ts:133-225](src/preload.ts#L133-L225)
+`src/app.ts`는 기본 모드에서 `manifest.json`을 읽고, `?bundle=`이 있으면 `src/bundle.ts`로 SIV 전체 구조와 내부 manifest를 검증한다. 두 경로는 같은 preload와 player에 연결된다. 프레임이 바뀌면 두 canvas가 같은 index를 표시하고 `src/depth.ts`가 깊이 원본을 컬러맵으로 바꿀 수 있다. [app.ts](src/app.ts), [bundle.ts](src/bundle.ts), [manifest.ts](src/manifest.ts), [preload.ts](src/preload.ts)
 
 ## 2. 이동 모델 수식, 최종 파라미터와 거동 수치
 
@@ -161,22 +161,22 @@ Success는 goal XY 거리 100cm 이하, signed speed 절댓값 5cm/s 이하, run
 
 frame 0은 capture 시작 즉시 만들며 `time_ms=0`이다. 이후 `FPlatformTime::Seconds()`의 실제 경과를 누적해 100ms 이상일 때 pair 한 개만 만든다. due 뒤 누적값은 0으로 초기화하므로 긴 hitch에서도 같은 tick에 밀린 frame을 여러 개 만들지 않는다. `time_ms`는 `index x 100`이 아니라 첫 capture 이후 실제 시각을 반올림한 값이며 반드시 이전 값보다 커야 한다. 따라서 100ms는 목표 간격이고 모든 저장 timestamp가 정확히 100ms 차이라는 뜻이 아니다. [ShipCaptureSimulation.cpp:10-98](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipCaptureSimulation.cpp#L10-L98), [ShipCaptureTests.cpp:273-396](ShipAutonomySim/Source/ShipAutonomySim/Private/Tests/ShipCaptureTests.cpp#L273-L396)
 
-### 0에서 5000cm 역선형 정규화
+### 0에서 2500cm 역선형 정규화
 
-5000cm는 Stage 5에서 확정한 제출 기본 계약이다. tracked 자료에서는 이 값의 별도 경험적 선정 또는 다른 범위와의 비교 근거를 확인하지 못했다. [ship capture design:150-156](docs/superpowers/specs/2026-08-09-ship-image-capture-design.md#L150-L156)
+기존 5000cm run의 178프레임, 46,661,632픽셀을 분석했다. 0이 아닌 유효 픽셀 중 92.656%가 1000cm 이내, 96.857%가 2000cm 이내, 97.818%가 2500cm 이내였다. 코스 길이 2000cm에 500cm 여유를 두면서 G8 양자화 간격을 약 19.6cm에서 약 9.8cm로 줄이기 위해 2500cm를 최종 far로 사용한다. [binary capture polish design](docs/superpowers/specs/2026-08-09-binary-capture-polish-design.md)
 
 ```text
-normalized = clamp((sceneDepthCm - 0) / (5000 - 0), 0, 1)
+normalized = clamp(sceneDepthCm / 2500, 0, 1)
 g8 = round((1 - normalized) x 255)
 ```
 
-0cm 이하와 near는 255, 2500cm는 128, 5000cm 이상은 0이다. NaN 또는 infinity 같은 invalid sample도 0이다. [ShipCaptureSimulation.cpp:101-155](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipCaptureSimulation.cpp#L101-L155), [ShipCaptureTests.cpp:399-462](ShipAutonomySim/Source/ShipAutonomySim/Private/Tests/ShipCaptureTests.cpp#L399-L462)
+0cm 이하와 near는 255, 1250cm는 약 128, 2500cm 이상은 0이다. NaN 또는 infinity 같은 invalid sample도 0이다. 가까운 값을 밝게 저장하면 웹 컬러맵에서 회피 대상이 되는 가까운 물체를 따뜻한 색에 바로 대응시킬 수 있다. 새 2500cm run 216프레임에서는 전체 픽셀의 53.807%가 0이 아니었고, 그중 94.343%가 1000cm 이내, 98.968%가 2000cm 이내였다. [ShipCaptureSimulation.cpp](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipCaptureSimulation.cpp), [ShipCaptureTests.cpp](ShipAutonomySim/Source/ShipAutonomySim/Private/Tests/ShipCaptureTests.cpp)
 
 ### pair transaction과 manifest
 
 두 PNG를 메모리에서 모두 만든 뒤 각각 숨김 temp 파일에 쓴다. 두 temp가 모두 유효할 때 color와 depth final 이름으로 차례로 rename하고, 두 final 파일이 모두 존재할 때만 frame record를 append한다. 중간 실패에서는 temp와 final pair 경로를 정리하므로 incomplete pair는 manifest에 기록하지 않는다. 두 rename 사이의 아주 짧은 구간까지 파일시스템 단일 원자 연산인 것은 아니다. [ShipCapture.cpp:297-446](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipCapture.cpp#L297-L446)
 
-manifest는 `frame_count`, `interval_ms`, `depth_near_cm`, `depth_far_cm`, `capture_resolution`, `wall_slide_cm`, `result`, `frames`의 정확한 8개 최상위 필드를 만든다. manifest도 temp write 뒤 final 이름으로 rename한다. [ShipCapture.cpp:724-829](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipCapture.cpp#L724-L829)
+manifest는 `frame_count`, `interval_ms`, `depth_near_cm`, `depth_far_cm`, `capture_resolution`, `wall_slide_cm`, `result`, `frames`의 정확한 8개 최상위 필드를 만든다. manifest도 temp write 뒤 final 이름으로 rename한다. 그 다음 manifest와 모든 PNG를 `SIVPACK1`, little-endian header 길이, JSON index, 연속 PNG payload로 구성한 `sequence.siv`에 추가 게시한다. bundle 실패가 필수 PNG와 manifest를 삭제하지는 않는다. [ShipCapture.cpp](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipCapture.cpp), [ShipCaptureBundle.cpp](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipCaptureBundle.cpp)
 
 과제 저장 데이터는 선박 전방 color/depth pair다. 웹 manifest에는 index당 color와 depth 경로 하나씩만 있고 3인칭 stream 필드가 없다. 따라서 웹 뷰어에 3인칭 영상을 추가하지 않은 현재 상태는 전방 pair와 공통 manifest 계약의 범위다. PIE 관찰용 CameraBoom이 존재한다는 사실과 혼동하지 않는다.
 
@@ -184,23 +184,23 @@ manifest는 `frame_count`, `interval_ms`, `depth_near_cm`, `depth_far_cm`, `capt
 
 ### Stage 4 capture-off 11개
 
-아래 actual-world 11개와 같은 실행의 capture-on 3개는 실행 SHA가 `b0b09a51b83e07f2458c71bec4509ff4855e0193`로 별도 확인된 D3D12 Automation 결과다. 그 SHA에서 현재 구현 기준 SHA까지 `ShipAutonomySim` diff는 0이고 이후 변경은 웹 favicon 한 줄뿐이다. 각 case는 fresh MainLevel, 실제 Water, 실제 Movement와 sweep을 사용한다. 최소 벽 거리는 앞에서 설명한 full-transform XY convex hull gap이다.
+아래 actual-world 11개와 capture-on 3개는 제품 코드 SHA `f481f5f0985970ce56b40a4432e657e0c5e6eb9d`에서 2026-08-09에 새로 실행한 결과다. 각 case는 fresh MainLevel, 실제 Water, 실제 Movement와 sweep을 사용한다. 최소 벽 거리는 앞에서 설명한 full-transform XY convex hull gap이다.
 
 | slide (cm) | success | elapsed (s) | min wall distance (cm) |
 | ---: | --- | ---: | ---: |
-| -500 | yes | 18.325 | 493.508 |
-| -400 | yes | 18.101 | 149.902 |
-| -300 | yes | 18.491 | 138.364 |
-| -200 | yes | 18.979 | 127.563 |
-| -100 | yes | 19.573 | 117.384 |
-| 0 | yes | 20.299 | 113.669 |
-| 100 | yes | 19.584 | 120.465 |
-| 200 | yes | 18.981 | 128.578 |
-| 300 | yes | 18.522 | 139.152 |
-| 400 | yes | 18.120 | 151.228 |
-| 500 | yes | 17.882 | 162.322 |
+| -500 | yes | 17.887 | 161.771 |
+| -400 | yes | 18.101 | 149.968 |
+| -300 | yes | 18.481 | 138.403 |
+| -200 | yes | 18.982 | 127.538 |
+| -100 | yes | 19.558 | 117.370 |
+| 0 | yes | 20.280 | 113.619 |
+| 100 | yes | 19.599 | 120.589 |
+| 200 | yes | 18.992 | 128.538 |
+| 300 | yes | 18.533 | 139.072 |
+| 400 | yes | 18.143 | 151.294 |
+| 500 | yes | 17.908 | 162.290 |
 
-기존 측정 근거: `ShipAutonomySim/Saved/Logs/Stage5-FinalIntegration-Main-ActualWorld-D3D12-20260809T033236189Z.log:2537-2547`. 이 로그는 로컬 검증 자료이며 `Saved` 제출 대상이 아니다.
+측정 근거: `ShipAutonomySim/Saved/Logs/Stage8-BinaryPolish-FinalActualWorld.log:2549-2559`와 `Stage8-BinaryPolish-FinalActualWorld-Rerun2.log:2547-2568`. 기존 -500의 약 493cm는 첫 게임 월드가 Automation 관측 시작 전에 진행되어 최근접 구간을 놓친 측정 오류였다. 첫 조건도 같은 option으로 fresh reload하도록 고친 뒤 세 독립 실행에서 161.850cm, 161.771cm, 161.824cm가 나와 최대 편차는 0.079cm였다. capture-on 162.668cm와도 일치하며 제품 항법 수식은 바꾸지 않았다.
 
 ### Stage 5 capture-on 3개
 
@@ -208,11 +208,13 @@ manifest는 `frame_count`, `interval_ms`, `depth_near_cm`, `depth_far_cm`, `capt
 
 | slide (cm) | success | elapsed (s) | min wall distance (cm) | frames | last time (ms) |
 | ---: | --- | ---: | ---: | ---: | ---: |
-| -500 | yes | 18.906 | 161.987 | 179 | 18702 |
-| 0 | yes | 21.766 | 114.288 | 205 | 21455 |
-| 500 | yes | 19.064 | 163.762 | 178 | 18710 |
+| -500 | yes | 19.562 | 162.668 | 187 | 19342 |
+| 0 | yes | 22.679 | 112.489 | 214 | 22203 |
+| 500 | yes | 19.936 | 163.385 | 188 | 19410 |
 
-기존 측정 근거: 같은 로그 `:2548-2551`. 전체 actual-world 집계는 cases 14, success 14, failure 0, error 0, unknown 0, ensure 0이었고 test exit code는 0이었다. `ShipNavigationWorldTests.cpp`는 capture-off 11개와 capture-on 3개를 별도 phase로 검증한다. [ShipNavigationWorldTests.cpp:1688-1777](ShipAutonomySim/Source/ShipAutonomySim/Private/Tests/ShipNavigationWorldTests.cpp#L1688-L1777)
+측정 근거: 같은 로그 `:2560-2570`. 전체 actual-world 집계는 cases 14, success 14, failure 0, error 0, unknown 0, ensure 0이었고 test exit code는 0이었다. 세 capture-on run 모두 manifest와 `sequence.siv`를 게시했다.
+
+capture-on은 같은 slide의 capture-off보다 -500에서 1.675초, 0에서 2.399초, 500에서 2.028초 느렸다. 증가율은 각각 9.36%, 11.83%, 11.32%다. 589개 pair transaction의 중앙값은 73.662ms, p95는 81.529ms였다. GPU readback, PNG 압축과 파일 쓰기를 game thread에서 동기 처리하는 비용이며 이를 숨기지 않고 한계로 보고한다.
 
 ### 기존 Automation 범위와 Stage 6 실행 범위
 
@@ -220,12 +222,12 @@ manifest는 `frame_count`, `interval_ms`, `depth_near_cm`, `depth_far_cm`, `capt
 | --- | --- | --- |
 | ShipMovement | 12/12, exit 0 | 아니오. 기존 로그와 현재 test source를 읽음 |
 | ShipNavigation editor | 19/19, exit 0 | 아니오. `ShipAutonomySim/Saved/Logs/Stage5-Final2-ShipNavigation-Editor.log:1199-1551` 확인 |
-| ShipCapture | 9/9, exit 0 | 아니오. `ShipAutonomySim/Saved/Logs/Stage5-FinalIntegration-Main-ShipCapture-D3D12-20260809T032843454Z.log:1294-1452` 확인 |
-| actual-world | 14/14 success, exit 0 | 아니오. 위 최신 결과 표를 읽음 |
-| 웹 Node | 52/52 | 예 |
+| ShipCapture | 10/10, exit 0 | 예. SIV exact bytes와 실패 경계 포함 |
+| actual-world | 14/14 success, exit 0 | 예. 위 최신 결과 표 |
+| 웹 Node | 66/66 | 예 |
 | Python | 4/4 | 예 |
 
-`ShipMovement`와 `ShipNavigation editor` 기존 로그의 정확한 실행 SHA는 이 자료에서 별도로 입증하지 못했으므로 추정하지 않는다. `ShipCapture`와 actual-world 묶음에만 별도로 확인된 실행 SHA `b0b09a51b83e07f2458c71bec4509ff4855e0193`를 적용하며, 그 SHA에서 현재 구현 기준까지 `ShipAutonomySim` 관련 소스 변경은 없다.
+`ShipMovement`와 `ShipNavigation editor` 기존 로그의 정확한 실행 SHA는 이 자료에서 별도로 입증하지 못했으므로 추정하지 않는다. 이번 ShipCapture와 actual-world 결과는 제품 코드 SHA `f481f5f0985970ce56b40a4432e657e0c5e6eb9d`에서 직접 실행했다.
 
 ## 7. UE 5.5.4와 Visual Studio 2022 빌드 절차
 
@@ -289,6 +291,7 @@ npm run build
 $Run = 'ShipAutonomySim\Saved\ShipCaptures\<run-directory>'
 $SourceFiles = @(
     Get-Item -LiteralPath (Join-Path $Run 'manifest.json')
+    Get-Item -LiteralPath (Join-Path $Run 'sequence.siv')
     Get-ChildItem -LiteralPath $Run -File -Filter 'color_*.png'
     Get-ChildItem -LiteralPath $Run -File -Filter 'depth_*.png'
 )
@@ -312,7 +315,7 @@ $CopiedPaths = @($SourceFiles | ForEach-Object {
 python -m http.server 8000
 ```
 
-브라우저에서 `http://localhost:8000`을 연다. 서버 종료는 같은 터미널에서 `Ctrl+C`다. 그 뒤 같은 PowerShell 세션에서 다음처럼 이번 복사본만 지운다.
+브라우저에서 `http://localhost:8000`을 열면 manifest 경로를 확인할 수 있고, `http://localhost:8000/?bundle=sequence.siv`에서는 단일 바이너리 경로와 접근 benchmark를 확인할 수 있다. 서버 종료는 같은 터미널에서 `Ctrl+C`다. 그 뒤 같은 PowerShell 세션에서 다음처럼 이번 복사본만 지운다.
 
 ```powershell
 $CopiedPaths | ForEach-Object { Remove-Item -LiteralPath $_ }
@@ -328,13 +331,15 @@ git status --short
 - 0.5x, 1x, 2x 속도
 - 깊이 grayscale과 colormap 전환
 - color/depth 동기 index와 manifest의 실제 `time_ms` 표시
+- manifest와 SIV 출처 표시, 프레임 수와 깊이 범위 요약
+- SIV 순차와 고정 seed 무작위 compressed-byte 접근 benchmark
 
 근거: [README.md:72-82](README.md#L72-L82), [app.ts:257-302](src/app.ts#L257-L302)
 
 ### Stage 6 실제 검사와 수동 확인 구분
 
 - Stage 6에서 외부 연결 없이 `npm ci --offline`, `npm run build`, `npm test`를 실행했다.
-- `npm test`는 TypeScript build 뒤 Node test 52개 중 52개 통과, fail 0이었다.
+- 최신 `npm test`는 TypeScript build 뒤 Node test 66개 중 66개 통과, fail 0이었다.
 - `python -m unittest discover -s tests -p "test_*.py" -v`는 4개 중 4개 통과였다.
 - Stage 6에서는 HTTP 서버와 브라우저를 새로 열지 않았다.
 - 전달받은 수동 확인 범위는 실제 color/depth 재생, 자동주행, 출력 파일, 웹 조작이다. 이 사실은 Stage 6에서 사람이 다시 확인했다고 바꿔 쓰지 않는다.
@@ -343,18 +348,18 @@ git status --short
 
 | 항목 | 현재 사실 또는 한계 | 근거와 상태 |
 | --- | --- | --- |
-| 선택 가산점 binary 압축 | 여러 PNG와 manifest를 쓰며, 단일 binary 파일 압축은 구현하지 않았다. | 과제 원문 p.3, [ShipCapture.cpp:664-688](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipCapture.cpp#L664-L688), [ShipCapture.cpp:724-761](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipCapture.cpp#L724-L761) |
+| 선택 가산점 단일 binary | 필수 PNG와 manifest를 유지하면서 같은 run을 `sequence.siv` 한 파일에 추가 게시한다. PNG는 이미 압축되어 있어 실제 재압축 절감률이 약 0.3%뿐이므로 추가 zlib은 넣지 않았다. 새 216프레임 SIV는 54,400,944 bytes이고 PNG 합계 대비 header와 index overhead는 0.1066%다. | [ShipCaptureBundle.cpp](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipCaptureBundle.cpp), [bundle.ts](src/bundle.ts), [binary capture polish design](docs/superpowers/specs/2026-08-09-binary-capture-polish-design.md) |
 | PCG | 단일 벽 코스는 C++ `ACourseBuilder`가 직접 생성하며 PCG asset 또는 module dependency가 없다. | [CourseBuilder.cpp:86-278](ShipAutonomySim/Source/ShipAutonomySim/Private/CourseBuilder.cpp#L86-L278), [ShipAutonomySim.Build.cs:17-28](ShipAutonomySim/Source/ShipAutonomySim/ShipAutonomySim.Build.cs#L17-L28) |
 | Niagara | Niagara module, system 또는 effect를 사용하지 않았다. | [ShipAutonomySim.Build.cs:17-28](ShipAutonomySim/Source/ShipAutonomySim/ShipAutonomySim.Build.cs#L17-L28), [ship navigation design:714-716](docs/superpowers/specs/2026-08-08-ship-autonomy-navigation-design.md#L714-L716) |
-| 캡처 frame-time | color/depth GPU readback, PNG 압축, temp write와 rename을 game thread 동기 경로에서 수행한다. 최신 capture-on slide 500의 마지막 세 pair는 transaction 68.779ms, 68.947ms, 69.282ms였고 인접 tick에 bounded substep drop 경고가 있었다. 이 인접 기록만으로 각 비용의 인과 비중을 나눌 수는 없다. Stage 6은 새 A/B 성능 집계를 하지 않았다. | [ShipCapture.cpp:594-688](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipCapture.cpp#L594-L688), [ShipCapture.cpp:297-455](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipCapture.cpp#L297-L455), `ShipAutonomySim/Saved/Logs/Stage5-FinalIntegration-Main-ActualWorld-D3D12-20260809T033236189Z.log:2528-2534` |
+| 캡처 frame-time | color/depth GPU readback, PNG 압축, temp write와 rename을 game thread 동기 경로에서 수행한다. 최신 589개 pair transaction의 중앙값은 73.662ms, p95는 81.529ms였다. capture-on 경과 시간은 같은 slide의 capture-off보다 9.36%에서 11.83% 늘었다. | [ShipCapture.cpp](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipCapture.cpp), `ShipAutonomySim/Saved/Logs/Stage8-BinaryPolish-FinalActualWorld.log` |
 | 두 capture의 동시성 | 같은 mount와 logical pair를 공유하지만 color와 depth `CaptureScene()`은 연속 호출이다. 단일 pass의 완전 동시 GPU capture는 아니다. | [ShipCapture.cpp:594-600](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipCapture.cpp#L594-L600) |
 | 선박 표현 | 충돌은 200 x 100 x 100cm box이고 시각 표현은 engine 기본 cube scale 2,1,1인 단순 mesh다. | [ShipPawn.cpp:31-43](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipPawn.cpp#L31-L43), [ShipMovementTests.cpp:1550-1582](ShipAutonomySim/Source/ShipAutonomySim/Private/Tests/ShipMovementTests.cpp#L1550-L1582) |
 | 횡미끄러짐 | signed forward speed와 yaw만 모델링하고 lateral velocity, slip angle, 선체 관성은 없다. | [ShipMovementSimulation.h:29-42](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipMovementSimulation.h#L29-L42), [ship movement design:20-29](docs/superpowers/specs/2026-08-08-ship-movement-model-design.md#L20-L29) |
 | 북서쪽 Water hole | commit `adac6870f6a819c981f9010ecacc2f043cef4f5d`에서 ShapeDilation 4096cm 뒤에도 dilated hole이 남도록 북서쪽 4200cm, 4점 linear polygon을 저장했다. 후속 `efecf64e6e26110c76f47b10a66aa3a273948a0b`는 기존 Water geometry 보존을 명시한다. current HEAD에 두 commit이 포함된다. 이는 map 특화 유지보수 요소다. Stage 6은 spline vertex를 새로 추출하지 않았고, 최신 actual-world 14건의 성공만 재사용했다. | 두 commit SHA와 현재 Git ancestry |
 | 실제 100ms 간격 | scheduler 목표는 100ms지만 저장 timestamp는 실제 시계다. capture-on 표도 last time과 frame count가 정확히 `100 x (frames-1)`로 고정되지 않는다. | [ShipCaptureSimulation.cpp:54-98](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipCaptureSimulation.cpp#L54-L98), 6절 기존 측정 |
-| clean-copy | 현재 checkout의 Editor target build는 통과했지만 Binaries와 Intermediate가 없는 별도 폴더 첫 build와 Play는 Stage 7 미확인이다. | 7절 Stage 6 확인과 Stage 7 이관 |
+| clean-copy | 현재 checkout의 Editor target build는 통과했다. 제출본에서는 Binaries, Intermediate와 Saved를 제외하고 소스에서 다시 빌드해야 한다. | 7절 빌드 절차 |
 | 수동 시각 품질 | color/depth 재생과 조작은 전달받은 수동 확인이다. Stage 6에서 viewport, PIE, 브라우저를 새로 실행하지 않았다. | 전달받은 범위와 Stage 6 실행 기록 |
-| 최종 보고서 | 사람이 작성해야 할 최종 보고서 본문은 이 파일의 완료 항목이 아니다. | 이 파일의 목적과 단계 프롬프트 |
+| 최종 보고서 | 채점자가 읽는 본문은 루트 `REPORT.md`로 분리했다. 이 파일은 세부 근거와 검증 경계를 보존한다. | [REPORT.md](REPORT.md) |
 
 `index.html`의 favicon data URL 한 줄은 브라우저의 암묵적 `/favicon.ico` 404를 없애기 위한 것이다. 제품 캡처, 저장 파일, manifest 또는 재생 결과를 바꾸는 기능이 아니다. [index.html:8-10](index.html#L8-L10), commit `6b2d756c3d28496ce0d144c1e0dcd2a3f194f257`.
 
@@ -383,19 +388,18 @@ git status --short
 | 단일 capture packing | render 호출 수를 줄일 수 있지만 최종 LDR 컬러, 고정 노출과 SceneDepth 정밀도를 한 출력 계약에 섞는다. 컬러와 깊이 SceneCapture 두 개 요구에 직접 맞지 않고 custom material과 변환 검증도 늘어나므로 선택하지 않았다. | [ship capture design:65-69](docs/superpowers/specs/2026-08-09-ship-image-capture-design.md#L65-L69) |
 | async GPU readback와 background writer | stall 감소 가능성은 있지만 GPU resource 수명, 동기화, queue와 failure 경계가 늘어난다. 현재는 공개 동기 API와 complete-pair transaction을 채택하고 성능 위험을 드러낸다. | [ship capture design:57-75](docs/superpowers/specs/2026-08-09-ship-image-capture-design.md#L57-L75), [ShipCapture.cpp:594-688](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipCapture.cpp#L594-L688) |
 | terminal 강제 capture | terminal tick에 scheduled capture가 due가 아니면 별도 frame을 강제로 추가하지 않는다. 강제 capture는 직전 frame과 100ms보다 가까운 duplicate를 만들 수 있어 제외했다. | [ship capture design:298-306](docs/superpowers/specs/2026-08-09-ship-image-capture-design.md#L298-L306) |
-| 단일 binary 압축 | 과제의 선택 가산점이며 현재 color/depth PNG와 manifest 계약에 포함되지 않았다. 구현 또는 성능 비교 근거가 없으므로 미구현으로 남긴다. | 과제 원문 p.3, [ShipCapture.cpp:724-761](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipCapture.cpp#L724-L761) |
+| PNG payload 추가 zlib | PNG 자체가 이미 lossless 압축되어 있다. 실제 178프레임 세트에서 파일별 재압축은 0.282%, 전체 재압축은 0.322%만 줄었다. 이득보다 UE와 브라우저 양쪽의 decompression 상태와 오류 경계 비용이 커서, 압축된 PNG를 index와 함께 `sequence.siv` 한 파일에 패킹했다. | [binary capture polish design](docs/superpowers/specs/2026-08-09-binary-capture-polish-design.md), [ShipCaptureBundle.cpp](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipCaptureBundle.cpp) |
 | engine Water 수정 | engine plugin source나 runtime bypass를 바꾸지 않고 MainLevel의 Ocean spline과 생성 mesh를 map-only로 수정했다. | commit `adac6870f6a819c981f9010ecacc2f043cef4f5d`, [ShipAutonomySim.Build.cs:17-28](ShipAutonomySim/Source/ShipAutonomySim/ShipAutonomySim.Build.cs#L17-L28) |
 | 1m hole | 현재 tracked 문서와 Git commit에는 1m hole을 실제 적용하고 검증했다는 근거가 없다. 따라서 시도 완료나 실패 원인을 주장하지 않는다. 확인 가능한 최종 선택은 ShapeDilation 4096cm보다 큰 4200cm hole이다. | commit `adac6870f6a819c981f9010ecacc2f043cef4f5d` |
 | 웹 3인칭 영상 추가 | 과제 저장 경로는 선박 전방 color와 SceneDepth pair이고, 현재 manifest는 index당 color/depth 하나씩만 가진다. 별도 3인칭 field, capture, preload와 canvas 계약을 늘리지 않았다. PIE 관찰 CameraBoom은 별도다. | [ShipCapture.cpp:724-761](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipCapture.cpp#L724-L761), [ShipPawn.cpp:60-91](ShipAutonomySim/Source/ShipAutonomySim/Private/ShipPawn.cpp#L60-L91), [manifest.ts:3-24](src/manifest.ts#L3-L24) |
 
 ## 출처 및 검증 경계 요약
 
-- 현재 구현 기준 SHA: `6b2d756c3d28496ce0d144c1e0dcd2a3f194f257`
-- 실행 SHA가 확인된 actual-world 및 최신 ShipCapture: `b0b09a51b83e07f2458c71bec4509ff4855e0193`
+- 제품 코드 및 최신 actual-world 실행 기준 SHA: `f481f5f0985970ce56b40a4432e657e0c5e6eb9d`
 - Water 4200cm hole 이력: `adac6870f6a819c981f9010ecacc2f043cef4f5d`
 - Water geometry 보존 후속 이력: `efecf64e6e26110c76f47b10a66aa3a273948a0b`
-- TypeScript 52개 회귀 계약 이력: `4c557467d38784b6d9b84a92b78f10f657ccba02`
+- TypeScript 전환 기반 이력: `4c557467d38784b6d9b84a92b78f10f657ccba02`
 - Stage 3 비유한 위치 방어 이력: `ea119f50aac4db72d7a17c544ae7ace99465410c`
 - `Saved` 아래 Automation 로그는 현재 로컬 근거이며 제출 범위와 Git commit에 포함하지 않는다.
-- Stage 6은 UE build, TypeScript build, Node 52/52, Python 4/4, 보호 파일 hash와 Git 상태를 확인했다.
-- Stage 7 clean-copy build와 사람이 수행할 최종 Play는 미확인이다.
+- 최신 보강은 UE build, ShipCapture 10/10, actual-world 14/14, Node 66/66, Python 4/4, 보호 파일 hash와 Git 상태를 확인한다.
+- 최종 사람이 수행할 PIE와 브라우저 시각 확인 절차는 README와 `REPORT.md`에 분리한다.
