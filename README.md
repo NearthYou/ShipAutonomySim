@@ -1,10 +1,33 @@
-# 선박 자율주행 캡처 웹 뷰어
+# 수상 자율주행 시뮬레이션과 캡처 뷰어
 
-`manifest.json`과 개별 PNG 또는 단일 `sequence.siv`에 기록된 컬러 및 깊이 시퀀스를 두 캔버스에 표시하고 같은 시간축에서 재생하는 정적 웹 뷰어입니다.
+이 저장소에는 Unreal Engine 5.5.4 선박 자율주행 시뮬레이션과 저장 이미지를 재생하는 정적 웹 뷰어가 함께 있습니다. 자세한 설계 판단과 측정 결과는 [REPORT.md](REPORT.md)에 정리했습니다.
 
-외부 런타임 라이브러리와 번들러는 사용하지 않습니다. TypeScript는 개발 시 ES 모듈을 컴파일하는 데만 사용하며, 실행에는 Node.js와 npm, Python 3, 최신 브라우저가 필요합니다.
+레벨에서 Play를 누르면 선박과 코스가 생성되고 자율주행과 컬러 및 깊이 저장이 자동으로 시작됩니다. 웹 뷰어는 개별 PNG와 `manifest.json` 또는 단일 `sequence.siv`를 같은 재생 화면으로 엽니다.
 
-## 빠른 실행
+## Unreal 실행
+
+필요 환경은 Unreal Engine 5.5.4와 Visual Studio 2022입니다. 저장소 루트의 PowerShell에서 빌드합니다.
+
+```powershell
+$EngineRoot = Join-Path $env:ProgramFiles 'Epic Games\UE_5.5'
+$Project = (Resolve-Path 'ShipAutonomySim\ShipAutonomySim.uproject').Path
+& (Join-Path $EngineRoot 'Engine\Build\BatchFiles\Build.bat') `
+    ShipAutonomySimEditor Win64 Development `
+    "-Project=$Project" -WaitMutex
+```
+
+빌드가 끝나면 `ShipAutonomySim/ShipAutonomySim.uproject`를 열고 `/Game/Maps/MainLevel`에서 Play를 누릅니다. 추가 키 입력이나 `viewmode unlit` 명령은 필요하지 않습니다. 성공한 실행은 보통 18초에서 23초 안에 끝나며 결과는 아래에 저장됩니다.
+
+```text
+ShipAutonomySim/Saved/ShipCaptures/<run>/
+    color_000000.png, depth_000000.png, ...
+    manifest.json
+    sequence.siv
+```
+
+## 웹 뷰어 빠른 실행
+
+웹 준비에는 Node.js와 npm, Python 3, 최신 브라우저가 필요합니다. 외부 런타임 라이브러리와 번들러는 사용하지 않으며, TypeScript는 ES 모듈을 컴파일하는 데만 사용합니다.
 
 저장소 루트에서 개발 도구를 설치하고 TypeScript를 빌드한 뒤 더미 데이터를 생성합니다.
 
@@ -86,7 +109,7 @@ http://localhost:8000/?bundle=sequence.siv
 - 상단에는 전체 이미지 로딩 진행률이 표시됩니다. 로딩이 끝나기 전에는 조작이 비활성화됩니다.
 - SIV 모드에서는 접근 성능 측정 버튼으로 순차 및 고정 seed 무작위 접근을 비교합니다.
 
-깊이는 0cm를 255, 2500cm 이상을 0으로 저장하는 역선형 G8입니다. 2500cm는 20m 코스에 5m 여유를 두고 실제 유효 픽셀의 97.8%를 보존하면서 기존 5000cm보다 양자화 간격을 절반으로 줄인 값입니다. 컬러맵은 밝은 가까운 값을 따뜻한 색으로 표시해 가까운 장애물을 먼저 식별하게 합니다.
+Unreal 실행에서 저장한 깊이는 0cm를 255, 2500cm 이상을 0으로 두는 역선형 G8입니다. 2500cm는 20m 코스에 5m 여유를 두고 실제 유효 픽셀의 97.8%를 보존하면서 기존 5000cm보다 양자화 간격을 절반으로 줄인 값입니다. 컬러맵은 밝은 가까운 값을 따뜻한 색으로 표시해 가까운 장애물을 먼저 식별하게 합니다.
 
 SIV benchmark는 PNG decode와 canvas render가 아니라 index가 가리키는 압축 PNG bytes를 `ArrayBuffer.slice`로 복사하는 시간만 측정합니다. 전체 asset을 한 번 준비한 뒤 각 순서로 세 번 실행한 평균을 `ms/image`로 표시합니다.
 
@@ -134,9 +157,9 @@ SIV 오류가 보이면 `sequence.siv`가 뷰어와 같은 출처에 있는지, 
 - `scripts/generate_dummy_data.py`: 표준 라이브러리 더미 데이터 생성기
 - `tests/`: TypeScript와 Python 자동 검사
 
-## Unreal Stage 5 데이터 캡처
+## Unreal 데이터 캡처
 
-이 저장소에는 정적 이미지 시퀀스 웹 뷰어와 Unreal Engine 5.5.4 과제 경로인 `ShipAutonomySim`이 함께 있습니다. `/Game/Maps/MainLevel`에서 Play하면 코스 생성, 자율주행과 Stage 5 컬러와 깊이 캡처가 입력 없이 자동으로 시작됩니다.
+`/Game/Maps/MainLevel`에서 Play하면 코스 생성, 자율주행과 컬러 및 깊이 캡처가 입력 없이 자동으로 시작됩니다. 저장 대상은 선박 전방의 같은 시점에서 얻은 컬러와 깊이 쌍입니다. 3인칭 카메라는 주행 관찰용이며 저장 데이터에는 포함하지 않습니다.
 
 캡처 결과는 실행마다 다음 형식의 고유 디렉터리에 저장됩니다.
 
@@ -153,7 +176,13 @@ ShipAutonomySim/Saved/ShipCaptures/YYYYMMDDTHHMMSSmmmZ_GUIDDIGITS/
 
 `sequence.siv`는 `SIVPACK1` magic, little-endian JSON header 길이, UTF-8 header, PNG payload 순서로 구성됩니다. PNG 자체가 이미 UE ImageWrapper의 무손실 압축 결과라 별도 zlib 이중 압축은 하지 않습니다. 실제 178프레임 데이터에서 이중 압축 이득이 0.4% 미만이었기 때문입니다. SIV는 캡처 중이 아니라 종료 뒤 게시된 PNG를 묶으므로 주행 및 100ms 캡처 timing에 추가 작업을 넣지 않습니다.
 
-실제 run을 확인할 때는 저장소 루트에서 `<run-directory>`를 선택한 디렉터리명으로 바꾼 뒤 다음 PowerShell을 실행합니다. 같은 이름의 루트 파일이 하나라도 있으면 아무것도 덮어쓰지 않고 중단합니다.
+단일 파일은 복사 없이 바로 확인할 수 있습니다. 저장소 루트에서 HTTP 서버를 실행한 뒤 `<run-directory>`만 실제 폴더명으로 바꿉니다.
+
+```text
+http://localhost:8000/?bundle=ShipAutonomySim/Saved/ShipCaptures/<run-directory>/sequence.siv
+```
+
+개별 PNG 모드를 확인할 때만 선택한 실행의 파일을 저장소 루트에 복사합니다. 다음 PowerShell은 같은 이름의 루트 파일이 있으면 덮어쓰지 않고 중단합니다.
 
 ```powershell
 $Run = 'ShipAutonomySim\Saved\ShipCaptures\<run-directory>'
