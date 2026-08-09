@@ -39,6 +39,18 @@ struct FShipCaptureRigSnapshot
     float FovDegrees = 0.0f;
 };
 
+struct FShipCaptureTransactionSnapshot
+{
+    bool bSucceeded = false;
+    int32 ColorCaptureSceneCallCount = 0;
+    int32 DepthCaptureSceneCallCount = 0;
+    int64 ColorReadbackPixelCount = 0;
+    int64 DepthReadbackPixelCount = 0;
+    TArray<FLinearColor> RawDepthSamples;
+    TArray64<uint8> ColorPngBytes;
+    TArray64<uint8> DepthPngBytes;
+};
+
 struct FShipCaptureAutomationAccessor;
 #endif
 
@@ -74,6 +86,18 @@ private:
         CaptureFailed,
         Finalizing,
         Finalized
+    };
+
+    enum class EShipCaptureFailureCategory : uint8
+    {
+        None,
+        InvalidConfiguration,
+        RigMismatch,
+        TargetUnavailable,
+        Readback,
+        PixelCount,
+        DepthNormalization,
+        PngEncode
     };
 
     UPROPERTY(EditAnywhere, Category=Capture)
@@ -115,10 +139,27 @@ private:
     EShipCaptureLifecycleState LifecycleState =
         EShipCaptureLifecycleState::NotStarted;
     bool bCaptureFailureLatched = false;
+    EShipCaptureFailureCategory FirstFailureCategory =
+        EShipCaptureFailureCategory::None;
+    int32 FirstFailureFrameIndex = INDEX_NONE;
 
     bool SetupCaptureRig();
+    bool HasOpticalEquality() const;
+    bool CaptureAndEncodePair(
+        int32 FrameIndex,
+        double CaptureSeconds,
+        TArray64<uint8>& OutColorPngBytes,
+        TArray64<uint8>& OutDepthPngBytes);
+    bool LatchCaptureFailure(
+        EShipCaptureFailureCategory FailureCategory,
+        int32 FrameIndex);
 
 #if WITH_DEV_AUTOMATION_TESTS
+    int32 TestColorCaptureSceneCallCount = 0;
+    int32 TestDepthCaptureSceneCallCount = 0;
+    int64 TestColorReadbackPixelCount = 0;
+    int64 TestDepthReadbackPixelCount = 0;
+    TArray<FLinearColor> TestRawDepthSamples;
     friend struct FShipCaptureAutomationAccessor;
 #endif
 };
@@ -127,5 +168,13 @@ private:
 struct FShipCaptureAutomationAccessor
 {
     static FShipCaptureRigSnapshot SetupRigOnly(AShipPawn& Pawn);
+    static void SetCaptureResolution(UShipCapture& Capture, int32 Resolution);
+    static void SetDepthRelativeLocationForTest(
+        UShipCapture& Capture,
+        const FVector& RelativeLocation);
+    static FShipCaptureTransactionSnapshot CaptureSingleTransaction(
+        UShipCapture& Capture,
+        int32 FrameIndex,
+        double CaptureSeconds);
 };
 #endif

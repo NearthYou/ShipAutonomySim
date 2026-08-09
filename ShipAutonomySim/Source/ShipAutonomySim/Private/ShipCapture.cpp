@@ -3,7 +3,12 @@
 #include "Components/SceneCaptureComponent2D.h"
 #include "Components/SceneComponent.h"
 #include "Engine/TextureRenderTarget2D.h"
+#include "IImageWrapperModule.h"
+#include "ImageCore.h"
+#include "Modules/ModuleManager.h"
 #include "ShipPawn.h"
+#include "ShipCaptureSimulation.h"
+#include "UnrealClient.h"
 
 UShipCapture::UShipCapture()
 {
@@ -114,6 +119,188 @@ bool UShipCapture::StartCapture(double WallSlideCm)
 
     LifecycleState = EShipCaptureLifecycleState::Capturing;
     SetComponentTickEnabled(true);
+    return true;
+}
+
+bool UShipCapture::HasOpticalEquality() const
+{
+    return IsValid(CaptureMount) &&
+        IsValid(ColorCapture) &&
+        IsValid(DepthCapture) &&
+        IsValid(ColorTarget) &&
+        IsValid(DepthTarget) &&
+        ColorCapture->GetAttachParent() == CaptureMount &&
+        DepthCapture->GetAttachParent() == CaptureMount &&
+        ColorCapture->GetRelativeTransform().Equals(FTransform::Identity) &&
+        DepthCapture->GetRelativeTransform().Equals(FTransform::Identity) &&
+        ColorCapture->GetComponentTransform().Equals(
+            DepthCapture->GetComponentTransform()) &&
+        ColorCapture->ProjectionType == ECameraProjectionMode::Perspective &&
+        DepthCapture->ProjectionType == ECameraProjectionMode::Perspective &&
+        ColorCapture->FOVAngle == CaptureFovDegrees &&
+        DepthCapture->FOVAngle == CaptureFovDegrees &&
+        !ColorCapture->bCaptureEveryFrame &&
+        !ColorCapture->bCaptureOnMovement &&
+        !ColorCapture->bAlwaysPersistRenderingState &&
+        !DepthCapture->bCaptureEveryFrame &&
+        !DepthCapture->bCaptureOnMovement &&
+        !DepthCapture->bAlwaysPersistRenderingState &&
+        ColorCapture->CaptureSource ==
+            ESceneCaptureSource::SCS_FinalColorLDR &&
+        DepthCapture->CaptureSource == ESceneCaptureSource::SCS_SceneDepth &&
+        ColorCapture->TextureTarget == ColorTarget &&
+        DepthCapture->TextureTarget == DepthTarget &&
+        ColorTarget->GetFormat() == PF_B8G8R8A8 &&
+        DepthTarget->GetFormat() == PF_R32_FLOAT &&
+        ColorTarget->SizeX == CaptureResolution &&
+        ColorTarget->SizeY == CaptureResolution &&
+        DepthTarget->SizeX == CaptureResolution &&
+        DepthTarget->SizeY == CaptureResolution;
+}
+
+bool UShipCapture::LatchCaptureFailure(
+    EShipCaptureFailureCategory FailureCategory,
+    int32 FrameIndex)
+{
+    if (!bCaptureFailureLatched)
+    {
+        bCaptureFailureLatched = true;
+        FirstFailureCategory = FailureCategory;
+        FirstFailureFrameIndex = FrameIndex;
+    }
+    LifecycleState = EShipCaptureLifecycleState::CaptureFailed;
+    SetComponentTickEnabled(false);
+    return false;
+}
+
+bool UShipCapture::CaptureAndEncodePair(
+    int32 FrameIndex,
+    double CaptureSeconds,
+    TArray64<uint8>& OutColorPngBytes,
+    TArray64<uint8>& OutDepthPngBytes)
+{
+    OutColorPngBytes.Reset();
+    OutDepthPngBytes.Reset();
+    const int32 TransactionFrameIndex = FrameIndex;
+    const double TransactionCaptureSeconds = CaptureSeconds;
+    FString ColorLeafName;
+    FString DepthLeafName;
+    if (!FMath::IsFinite(TransactionCaptureSeconds) ||
+        TransactionCaptureSeconds < 0.0 ||
+        !MakeCaptureFrameLeafNames(
+            TransactionFrameIndex,
+            ColorLeafName,
+            DepthLeafName) ||
+        !HasOpticalEquality())
+    {
+        return LatchCaptureFailure(
+            EShipCaptureFailureCategory::RigMismatch,
+            TransactionFrameIndex);
+    }
+
+#if WITH_DEV_AUTOMATION_TESTS
+    ++TestColorCaptureSceneCallCount;
+    ++TestDepthCaptureSceneCallCount;
+#endif
+    ColorCapture->CaptureScene();
+    DepthCapture->CaptureScene();
+
+    FTextureRenderTargetResource* ColorResource =
+        ColorTarget->GameThread_GetRenderTargetResource();
+    FTextureRenderTargetResource* DepthResource =
+        DepthTarget->GameThread_GetRenderTargetResource();
+    if (ColorResource == nullptr || DepthResource == nullptr)
+    {
+        return LatchCaptureFailure(
+            EShipCaptureFailureCategory::TargetUnavailable,
+            TransactionFrameIndex);
+    }
+
+    TArray<FColor> ColorPixels;
+    TArray<FLinearColor> DepthSamples;
+    const FIntRect ReadRect(
+        0,
+        0,
+        CaptureResolution,
+        CaptureResolution);
+    const bool bColorRead = ColorResource->ReadPixels(
+        ColorPixels,
+        FReadSurfaceDataFlags(RCM_UNorm),
+        ReadRect);
+    const bool bDepthRead = DepthResource->ReadLinearColorPixels(
+        DepthSamples,
+        FReadSurfaceDataFlags(RCM_MinMax),
+        ReadRect);
+#if WITH_DEV_AUTOMATION_TESTS
+    TestColorReadbackPixelCount = ColorPixels.Num();
+    TestDepthReadbackPixelCount = DepthSamples.Num();
+    TestRawDepthSamples = DepthSamples;
+#endif
+    if (!bColorRead || !bDepthRead)
+    {
+        return LatchCaptureFailure(
+            EShipCaptureFailureCategory::Readback,
+            TransactionFrameIndex);
+    }
+
+    const int64 ExpectedPixelCount =
+        static_cast<int64>(CaptureResolution) * CaptureResolution;
+    if (ExpectedPixelCount < 1 ||
+        ExpectedPixelCount > MAX_int32 ||
+        ColorPixels.Num() != ExpectedPixelCount ||
+        DepthSamples.Num() != ExpectedPixelCount)
+    {
+        return LatchCaptureFailure(
+            EShipCaptureFailureCategory::PixelCount,
+            TransactionFrameIndex);
+    }
+
+    TArray64<uint8> DepthPixels;
+    if (!NormalizeSceneDepthToG8(
+            DepthSamples,
+            static_cast<int32>(ExpectedPixelCount),
+            DepthNearCm,
+            DepthFarCm,
+            DepthPixels))
+    {
+        return LatchCaptureFailure(
+            EShipCaptureFailureCategory::DepthNormalization,
+            TransactionFrameIndex);
+    }
+
+    IImageWrapperModule& ImageWrapper =
+        FModuleManager::LoadModuleChecked<IImageWrapperModule>(
+            TEXT("ImageWrapper"));
+    const FImageView ColorView(
+        ColorPixels.GetData(),
+        CaptureResolution,
+        CaptureResolution,
+        EGammaSpace::sRGB);
+    const FImageView DepthView(
+        DepthPixels.GetData(),
+        CaptureResolution,
+        CaptureResolution,
+        1,
+        ERawImageFormat::G8,
+        EGammaSpace::Linear);
+    if (!ImageWrapper.CompressImage(
+            OutColorPngBytes,
+            EImageFormat::PNG,
+            ColorView) ||
+        !ImageWrapper.CompressImage(
+            OutDepthPngBytes,
+            EImageFormat::PNG,
+            DepthView) ||
+        OutColorPngBytes.IsEmpty() ||
+        OutDepthPngBytes.IsEmpty())
+    {
+        OutColorPngBytes.Reset();
+        OutDepthPngBytes.Reset();
+        return LatchCaptureFailure(
+            EShipCaptureFailureCategory::PngEncode,
+            TransactionFrameIndex);
+    }
+
     return true;
 }
 
@@ -238,6 +425,46 @@ FShipCaptureRigSnapshot FShipCaptureAutomationAccessor::SetupRigOnly(
         Color->FOVAngle == Depth->FOVAngle
             ? Color->FOVAngle
             : 0.0f;
+    return Snapshot;
+}
+
+void FShipCaptureAutomationAccessor::SetCaptureResolution(
+    UShipCapture& Capture,
+    int32 Resolution)
+{
+    if (!IsValid(Capture.ColorTarget) && !IsValid(Capture.DepthTarget))
+    {
+        Capture.CaptureResolution = Resolution;
+    }
+}
+
+FShipCaptureTransactionSnapshot
+FShipCaptureAutomationAccessor::CaptureSingleTransaction(
+    UShipCapture& Capture,
+    int32 FrameIndex,
+    double CaptureSeconds)
+{
+    Capture.TestColorCaptureSceneCallCount = 0;
+    Capture.TestDepthCaptureSceneCallCount = 0;
+    Capture.TestColorReadbackPixelCount = 0;
+    Capture.TestDepthReadbackPixelCount = 0;
+    Capture.TestRawDepthSamples.Reset();
+
+    FShipCaptureTransactionSnapshot Snapshot;
+    Snapshot.bSucceeded = Capture.CaptureAndEncodePair(
+        FrameIndex,
+        CaptureSeconds,
+        Snapshot.ColorPngBytes,
+        Snapshot.DepthPngBytes);
+    Snapshot.ColorCaptureSceneCallCount =
+        Capture.TestColorCaptureSceneCallCount;
+    Snapshot.DepthCaptureSceneCallCount =
+        Capture.TestDepthCaptureSceneCallCount;
+    Snapshot.ColorReadbackPixelCount =
+        Capture.TestColorReadbackPixelCount;
+    Snapshot.DepthReadbackPixelCount =
+        Capture.TestDepthReadbackPixelCount;
+    Snapshot.RawDepthSamples = Capture.TestRawDepthSamples;
     return Snapshot;
 }
 #endif

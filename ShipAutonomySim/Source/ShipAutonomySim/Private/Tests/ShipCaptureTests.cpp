@@ -1,11 +1,18 @@
 #if WITH_DEV_AUTOMATION_TESTS
 #include <limits>
 
+#include "Components/SceneCaptureComponent2D.h"
+#include "Components/StaticMeshComponent.h"
+#include "Engine/StaticMeshActor.h"
 #include "Engine/World.h"
+#include "IImageWrapperModule.h"
+#include "ImageCore.h"
 #include "Misc/AutomationTest.h"
+#include "Modules/ModuleManager.h"
 #include "ShipCapture.h"
 #include "ShipCaptureSimulation.h"
 #include "ShipPawn.h"
+#include "UObject/UObjectGlobals.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     FShipCaptureSchedulerTest,
@@ -27,6 +34,11 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     "ShipAutonomySim.ShipCapture.Component.RigConfiguration",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipCaptureReadbackAndEncodingTest,
+    "ShipAutonomySim.ShipCapture.Image.ReadbackAndEncoding",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
 namespace
 {
 class FScopedShipCaptureTestWorld
@@ -45,6 +57,16 @@ public:
 
     UWorld* World = nullptr;
 };
+}
+
+void FShipCaptureAutomationAccessor::SetDepthRelativeLocationForTest(
+    UShipCapture& Capture,
+    const FVector& RelativeLocation)
+{
+    if (IsValid(Capture.DepthCapture))
+    {
+        Capture.DepthCapture->SetRelativeLocation(RelativeLocation);
+    }
 }
 
 bool FShipCaptureSchedulerTest::RunTest(const FString& Parameters)
@@ -387,5 +409,173 @@ bool FShipCaptureRigConfigurationTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("Default FOV is 90 degrees"), Snapshot.FovDegrees, 90.0f);
 
     return true;
+}
+
+bool FShipCaptureReadbackAndEncodingTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+
+    FScopedShipCaptureTestWorld TestWorld;
+    UStaticMesh* CubeMesh = LoadObject<UStaticMesh>(
+        nullptr,
+        TEXT("/Engine/BasicShapes/Cube.Cube"));
+    AStaticMeshActor* Cube = TestWorld.World->SpawnActor<AStaticMeshActor>();
+    TestNotNull(TEXT("Known cube mesh loads"), CubeMesh);
+    TestNotNull(TEXT("Known cube actor spawns"), Cube);
+    if (CubeMesh == nullptr || Cube == nullptr)
+    {
+        return false;
+    }
+    Cube->GetStaticMeshComponent()->SetStaticMesh(CubeMesh);
+    Cube->SetActorLocation(FVector(600.0, 0.0, 50.0));
+    Cube->SetActorScale3D(FVector(1.0, 4.0, 4.0));
+
+    AShipPawn* MismatchPawn = TestWorld.World->SpawnActor<AShipPawn>();
+    TestNotNull(TEXT("Mismatch pawn spawns"), MismatchPawn);
+    if (MismatchPawn == nullptr || MismatchPawn->GetCapture() == nullptr)
+    {
+        return false;
+    }
+    UShipCapture& MismatchCapture = *MismatchPawn->GetCapture();
+    FShipCaptureAutomationAccessor::SetCaptureResolution(MismatchCapture, 32);
+    TestTrue(
+        TEXT("Mismatch rig initially sets up"),
+        FShipCaptureAutomationAccessor::SetupRigOnly(*MismatchPawn)
+            .bSetupSucceeded);
+    FShipCaptureAutomationAccessor::SetDepthRelativeLocationForTest(
+        MismatchCapture,
+        FVector(1.0, 0.0, 0.0));
+    const FShipCaptureTransactionSnapshot Mismatch =
+        FShipCaptureAutomationAccessor::CaptureSingleTransaction(
+            MismatchCapture,
+            0,
+            0.0);
+    TestFalse(TEXT("Optical mismatch rejects transaction"), Mismatch.bSucceeded);
+    TestEqual(
+        TEXT("Mismatch calls no color capture"),
+        Mismatch.ColorCaptureSceneCallCount,
+        0);
+    TestEqual(
+        TEXT("Mismatch calls no depth capture"),
+        Mismatch.DepthCaptureSceneCallCount,
+        0);
+    MismatchPawn->Destroy();
+
+    AShipPawn* Pawn = TestWorld.World->SpawnActor<AShipPawn>();
+    TestNotNull(TEXT("Capture pawn spawns"), Pawn);
+    if (Pawn == nullptr || Pawn->GetCapture() == nullptr)
+    {
+        return false;
+    }
+    UShipCapture& Capture = *Pawn->GetCapture();
+    FShipCaptureAutomationAccessor::SetCaptureResolution(Capture, 32);
+    TestTrue(
+        TEXT("Capture rig sets up"),
+        FShipCaptureAutomationAccessor::SetupRigOnly(*Pawn).bSetupSucceeded);
+
+    const FShipCaptureTransactionSnapshot Snapshot =
+        FShipCaptureAutomationAccessor::CaptureSingleTransaction(
+            Capture,
+            0,
+            0.0);
+    TestTrue(TEXT("Synchronous transaction succeeds"), Snapshot.bSucceeded);
+    TestEqual(
+        TEXT("Color CaptureScene is called once"),
+        Snapshot.ColorCaptureSceneCallCount,
+        1);
+    TestEqual(
+        TEXT("Depth CaptureScene is called once"),
+        Snapshot.DepthCaptureSceneCallCount,
+        1);
+    TestEqual(
+        TEXT("Color readback has 1024 pixels"),
+        Snapshot.ColorReadbackPixelCount,
+        int64{1024});
+    TestEqual(
+        TEXT("Depth readback has 1024 pixels"),
+        Snapshot.DepthReadbackPixelCount,
+        int64{1024});
+    TestEqual(
+        TEXT("Raw depth snapshot has 1024 samples"),
+        Snapshot.RawDepthSamples.Num(),
+        1024);
+    for (int32 PixelIndex = 0;
+         PixelIndex < Snapshot.RawDepthSamples.Num();
+         ++PixelIndex)
+    {
+        const FLinearColor& Sample = Snapshot.RawDepthSamples[PixelIndex];
+        if (!FMath::IsFinite(Sample.R) ||
+            Sample.G != 0.0f ||
+            Sample.B != 0.0f ||
+            Sample.A != 1.0f)
+        {
+            AddError(FString::Printf(
+                TEXT("Invalid raw depth sample at %d: %.9g %.9g %.9g %.9g"),
+                PixelIndex,
+                Sample.R,
+                Sample.G,
+                Sample.B,
+                Sample.A));
+            break;
+        }
+    }
+
+    const uint8 PngSignature[] = {137, 80, 78, 71, 13, 10, 26, 10};
+    TestTrue(
+        TEXT("Color PNG contains its signature"),
+        Snapshot.ColorPngBytes.Num() >= 8 &&
+            FMemory::Memcmp(
+                Snapshot.ColorPngBytes.GetData(),
+                PngSignature,
+                UE_ARRAY_COUNT(PngSignature)) == 0);
+    TestTrue(
+        TEXT("Depth PNG contains its signature"),
+        Snapshot.DepthPngBytes.Num() >= 8 &&
+            FMemory::Memcmp(
+                Snapshot.DepthPngBytes.GetData(),
+                PngSignature,
+                UE_ARRAY_COUNT(PngSignature)) == 0);
+
+    IImageWrapperModule& ImageWrapper =
+        FModuleManager::LoadModuleChecked<IImageWrapperModule>(
+            TEXT("ImageWrapper"));
+    FImage ColorImage;
+    TestTrue(
+        TEXT("Color PNG decodes"),
+        ImageWrapper.DecompressImage(
+            Snapshot.ColorPngBytes.GetData(),
+            Snapshot.ColorPngBytes.Num(),
+            ColorImage));
+    TestEqual(TEXT("Color PNG width"), ColorImage.SizeX, 32);
+    TestEqual(TEXT("Color PNG height"), ColorImage.SizeY, 32);
+    TestEqual(
+        TEXT("Color PNG is browser-readable BGRA8"),
+        ColorImage.Format,
+        ERawImageFormat::BGRA8);
+
+    FImage DepthImage;
+    TestTrue(
+        TEXT("Depth PNG decodes"),
+        ImageWrapper.DecompressImage(
+            Snapshot.DepthPngBytes.GetData(),
+            Snapshot.DepthPngBytes.Num(),
+            DepthImage));
+    TestEqual(TEXT("Depth PNG width"), DepthImage.SizeX, 32);
+    TestEqual(TEXT("Depth PNG height"), DepthImage.SizeY, 32);
+    TestEqual(
+        TEXT("Depth PNG is 8-bit grayscale"),
+        DepthImage.Format,
+        ERawImageFormat::G8);
+    if (DepthImage.Format == ERawImageFormat::G8 &&
+        DepthImage.SizeX == 32 &&
+        DepthImage.SizeY == 32)
+    {
+        const TArrayView64<const uint8> DepthPixels = DepthImage.AsG8();
+        TestTrue(
+            TEXT("Near cube is brighter than far background"),
+            DepthPixels[16 * 32 + 16] > DepthPixels[0]);
+    }
+
+    return !HasAnyErrors();
 }
 #endif
