@@ -5,6 +5,7 @@
 #include "Components/StaticMeshComponent.h"
 #include "Dom/JsonObject.h"
 #include "Engine/StaticMeshActor.h"
+#include "Engine/TextureRenderTarget2D.h"
 #include "Engine/World.h"
 #include "IImageWrapperModule.h"
 #include "ImageCore.h"
@@ -571,6 +572,20 @@ bool FShipCaptureRigConfigurationTest::RunTest(const FString& Parameters)
 
     const FShipCaptureRigSnapshot Snapshot =
         FShipCaptureAutomationAccessor::SetupRigOnly(*Pawn);
+
+    TArray<USceneCaptureComponent2D*> CaptureComponents;
+    Pawn->GetComponents(CaptureComponents);
+    USceneCaptureComponent2D* DepthCapture = nullptr;
+    for (USceneCaptureComponent2D* CaptureComponent : CaptureComponents)
+    {
+        if (IsValid(CaptureComponent) &&
+            CaptureComponent->CaptureSource == ESceneCaptureSource::SCS_SceneDepth)
+        {
+            DepthCapture = CaptureComponent;
+            break;
+        }
+    }
+
     TestTrue(TEXT("Rig setup succeeds"), Snapshot.bSetupSucceeded);
     TestEqual(TEXT("One capture mount"), Snapshot.CaptureMountCount, 1);
     TestEqual(TEXT("One color capture"), Snapshot.ColorCaptureCount, 1);
@@ -595,6 +610,17 @@ bool FShipCaptureRigConfigurationTest::RunTest(const FString& Parameters)
         Snapshot.bDepthSourceSceneDepth);
     TestTrue(TEXT("Color target is BGRA8"), Snapshot.bColorTargetBgra8);
     TestTrue(TEXT("Depth target is R32 float"), Snapshot.bDepthTargetR32Float);
+    TestNotNull(TEXT("Depth capture exists"), DepthCapture);
+    if (DepthCapture != nullptr)
+    {
+        TestNotNull(TEXT("Depth target exists"), DepthCapture->TextureTarget.Get());
+        if (DepthCapture->TextureTarget != nullptr)
+        {
+            TestFalse(
+                TEXT("Depth target uses linear gamma"),
+                DepthCapture->TextureTarget->IsSRGB());
+        }
+    }
     TestTrue(TEXT("Color exposure is fixed"), Snapshot.bFixedColorExposure);
     TestEqual(TEXT("Default resolution is 512"), Snapshot.Resolution, 512);
     TestEqual(TEXT("Default FOV is 90 degrees"), Snapshot.FovDegrees, 90.0f);

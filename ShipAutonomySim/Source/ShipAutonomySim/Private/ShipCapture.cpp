@@ -154,7 +154,7 @@ bool UShipCapture::SetupCaptureRig()
         CaptureResolution,
         CaptureResolution,
         PF_R32_FLOAT,
-        false);
+        true);
     ColorCapture->TextureTarget = ColorTarget;
     DepthCapture->TextureTarget = DepthTarget;
     return ColorTarget->GetFormat() == PF_B8G8R8A8 &&
