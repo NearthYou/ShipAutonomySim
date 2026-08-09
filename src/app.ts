@@ -1,4 +1,13 @@
 import { colorizeDepthPixelsInPlace } from "./depth.js";
+import {
+  benchmarkBundleAccess,
+  BundleError,
+  loadBundle,
+} from "./bundle.js";
+import type {
+  BundleBenchmarkMetric,
+  BundleSequenceSource,
+} from "./bundle.js";
 import { loadManifest, ManifestError } from "./manifest.js";
 import type { FrameKind, SequenceManifest } from "./manifest.js";
 import { SequencePlayer } from "./player.js";
@@ -7,6 +16,19 @@ import type { PreloadedFrame, PreloadProgress } from "./preload.js";
 
 export type DepthDisplayMode = "grayscale" | "colormap";
 export type ViewerState = "loading" | "ready" | "playing" | "paused" | "error";
+export type ViewerSourceKind = "manifest" | "bundle";
+
+export interface LoadedViewerSource {
+  kind: ViewerSourceKind;
+  manifest: SequenceManifest;
+  bundleSource: BundleSequenceSource | null;
+}
+
+interface ViewerSourceLoaders {
+  pageUrl?: string;
+  manifestLoader?: (url: string) => Promise<SequenceManifest>;
+  bundleLoader?: (url: string) => Promise<BundleSequenceSource>;
+}
 
 const VIEWER_STATE_LABELS: Record<ViewerState, string> = {
   loading: "로딩 중",
@@ -23,10 +45,16 @@ const FRAME_KIND_LABELS: Record<FrameKind, string> = {
 const MAX_CAUSE_DESCRIPTION_LENGTH = 200;
 
 interface ViewerElements {
+  benchmarkButton: HTMLButtonElement;
+  benchmarkPanel: HTMLElement;
+  benchmarkRandom: HTMLOutputElement;
+  benchmarkSequential: HTMLOutputElement;
   colorCanvas: HTMLCanvasElement;
   depthCanvas: HTMLCanvasElement;
+  depthFarLabel: HTMLSpanElement;
   depthMode: HTMLButtonElement;
   depthModeBadge: HTMLSpanElement;
+  depthNearLabel: HTMLSpanElement;
   frameReadout: HTMLOutputElement;
   frameSlider: HTMLInputElement;
   loadingLabel: HTMLSpanElement;
@@ -39,6 +67,10 @@ interface ViewerElements {
   playbackSpeed: HTMLSelectElement;
   previousFrame: HTMLButtonElement;
   restart: HTMLButtonElement;
+  sourceBadge: HTMLSpanElement;
+  summaryDepthRange: HTMLOutputElement;
+  summaryFrameCount: HTMLOutputElement;
+  summaryInterval: HTMLOutputElement;
   timeReadout: HTMLOutputElement;
   viewerError: HTMLElement;
   viewerErrorMessage: HTMLParagraphElement;
@@ -72,6 +104,56 @@ export function formatElapsed(timeMs: unknown): string {
   const milliseconds = safeTime % 1_000;
 
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(milliseconds).padStart(3, "0")}`;
+}
+
+export function viewerSourceLabel(kind: ViewerSourceKind): string {
+  return kind === "bundle" ? "SIV BINARY" : "MANIFEST + PNG";
+}
+
+export function formatBenchmarkMetric(metric: BundleBenchmarkMetric): string {
+  return `${metric.averageMsPerImage.toFixed(3)} ms/image, ${metric.sampleCount} samples`;
+}
+
+export async function loadViewerSource(
+  search: string,
+  {
+    pageUrl = globalThis.location?.href ?? "http://localhost/",
+    manifestLoader = loadManifest,
+    bundleLoader = loadBundle,
+  }: ViewerSourceLoaders = {},
+): Promise<LoadedViewerSource> {
+  const parameters = new URLSearchParams(search);
+  if (!parameters.has("bundle")) {
+    return {
+      kind: "manifest",
+      manifest: await manifestLoader("./manifest.json"),
+      bundleSource: null,
+    };
+  }
+
+  const bundlePath = parameters.get("bundle")?.trim() ?? "";
+  if (bundlePath === "") {
+    throw new BundleError("bundle query에는 SIV 파일 경로가 필요합니다.");
+  }
+
+  let page: URL;
+  let bundleUrl: URL;
+  try {
+    page = new URL(pageUrl);
+    bundleUrl = new URL(bundlePath, page);
+  } catch (cause) {
+    throw new BundleError("bundle query의 URL을 해석할 수 없습니다.", { cause });
+  }
+  if (bundleUrl.origin !== page.origin) {
+    throw new BundleError("SIV 파일은 뷰어와 동일한 출처에 있어야 합니다.");
+  }
+
+  const bundleSource = await bundleLoader(bundleUrl.href);
+  return {
+    kind: "bundle",
+    manifest: bundleSource.manifest,
+    bundleSource,
+  };
 }
 
 function fileNameFromUrl(url: string): string {
@@ -109,6 +191,10 @@ function normalizeCauseDescription(cause: unknown): string {
 }
 
 export function describeViewerError(error: unknown): string {
+  if (error instanceof BundleError) {
+    return `${error.message} sequence.siv 파일과 bundle query를 확인하세요.`;
+  }
+
   if (error instanceof ManifestError) {
     return `${error.message} manifest.json의 내용과 로컬 서버 실행 상태를 확인하세요.`;
   }
@@ -144,10 +230,16 @@ function requireElement<TElement extends HTMLElement>(root: Document, id: string
 
 function collectElements(root: Document): ViewerElements {
   return {
+    benchmarkButton: requireElement<HTMLButtonElement>(root, "benchmark-button"),
+    benchmarkPanel: requireElement<HTMLElement>(root, "benchmark-panel"),
+    benchmarkRandom: requireElement<HTMLOutputElement>(root, "benchmark-random"),
+    benchmarkSequential: requireElement<HTMLOutputElement>(root, "benchmark-sequential"),
     colorCanvas: requireElement<HTMLCanvasElement>(root, "color-canvas"),
     depthCanvas: requireElement<HTMLCanvasElement>(root, "depth-canvas"),
+    depthFarLabel: requireElement<HTMLSpanElement>(root, "depth-far-label"),
     depthMode: requireElement<HTMLButtonElement>(root, "depth-mode"),
     depthModeBadge: requireElement<HTMLSpanElement>(root, "depth-mode-badge"),
+    depthNearLabel: requireElement<HTMLSpanElement>(root, "depth-near-label"),
     frameReadout: requireElement<HTMLOutputElement>(root, "frame-readout"),
     frameSlider: requireElement<HTMLInputElement>(root, "frame-slider"),
     loadingLabel: requireElement<HTMLSpanElement>(root, "loading-label"),
@@ -160,6 +252,10 @@ function collectElements(root: Document): ViewerElements {
     playbackSpeed: requireElement<HTMLSelectElement>(root, "playback-speed"),
     previousFrame: requireElement<HTMLButtonElement>(root, "previous-frame"),
     restart: requireElement<HTMLButtonElement>(root, "restart"),
+    sourceBadge: requireElement<HTMLSpanElement>(root, "source-badge"),
+    summaryDepthRange: requireElement<HTMLOutputElement>(root, "summary-depth-range"),
+    summaryFrameCount: requireElement<HTMLOutputElement>(root, "summary-frame-count"),
+    summaryInterval: requireElement<HTMLOutputElement>(root, "summary-interval"),
     timeReadout: requireElement<HTMLOutputElement>(root, "time-readout"),
     viewerError: requireElement<HTMLElement>(root, "viewer-error"),
     viewerErrorMessage: requireElement<HTMLParagraphElement>(root, "viewer-error-message"),
@@ -205,6 +301,8 @@ class ViewerController {
   frames: readonly PreloadedFrame[] = [];
   player: SequencePlayer | null = null;
   depthMode: DepthDisplayMode = "grayscale";
+  bundleSource: BundleSequenceSource | null = null;
+  sourceKind: ViewerSourceKind = "manifest";
 
   constructor(root: Document) {
     this.root = root;
@@ -218,10 +316,22 @@ class ViewerController {
   async start(): Promise<void> {
     this.setControlsEnabled(false);
     this.setViewerState("loading");
-    this.updateLoading({ percent: 0, label: "manifest.json 확인 중" });
+    this.updateLoading({ percent: 0, label: "시퀀스 출처 확인 중" });
 
     try {
-      this.manifest = await loadManifest("./manifest.json");
+      const search = this.root.defaultView?.location.search ?? globalThis.location?.search ?? "";
+      const loadedSource = await loadViewerSource(search);
+      this.sourceKind = loadedSource.kind;
+      this.manifest = loadedSource.manifest;
+      this.bundleSource = loadedSource.bundleSource;
+      this.updateSourceSummary();
+      if (this.bundleSource) {
+        this.root.defaultView?.addEventListener(
+          "pagehide",
+          () => this.bundleSource?.revoke(),
+          { once: true },
+        );
+      }
       const imageCount = this.manifest.frameCount * 2;
       this.updateLoading({ percent: 0, label: `이미지 0 / ${imageCount} 불러오는 중` });
 
@@ -287,6 +397,26 @@ class ViewerController {
       this.depthMode = this.depthMode === "grayscale" ? "colormap" : "grayscale";
       this.updateDepthModeControl();
       this.renderFrame(this.player.index);
+    });
+
+    elements.benchmarkButton.addEventListener("click", () => {
+      if (!this.bundleSource) return;
+      elements.benchmarkButton.disabled = true;
+      elements.benchmarkButton.textContent = "측정 중";
+      try {
+        const result = benchmarkBundleAccess(this.bundleSource);
+        elements.benchmarkSequential.value = formatBenchmarkMetric(result.sequential);
+        elements.benchmarkSequential.textContent = formatBenchmarkMetric(result.sequential);
+        elements.benchmarkRandom.value = formatBenchmarkMetric(result.random);
+        elements.benchmarkRandom.textContent = formatBenchmarkMetric(result.random);
+      } catch (error) {
+        this.showError(error);
+      } finally {
+        elements.benchmarkButton.textContent = "접근 성능 측정";
+        if (this.player && this.elements.viewerError.hidden) {
+          elements.benchmarkButton.disabled = false;
+        }
+      }
     });
   }
 
@@ -399,6 +529,21 @@ class ViewerController {
     this.elements.loadingLabel.textContent = label;
   }
 
+  private updateSourceSummary(): void {
+    if (!this.manifest) return;
+    const { nearCm, farCm } = this.manifest.depthRange;
+    this.elements.sourceBadge.textContent = viewerSourceLabel(this.sourceKind);
+    this.elements.summaryFrameCount.value = String(this.manifest.frameCount);
+    this.elements.summaryFrameCount.textContent = String(this.manifest.frameCount);
+    this.elements.summaryInterval.value = `${this.manifest.intervalMs} ms`;
+    this.elements.summaryInterval.textContent = `${this.manifest.intervalMs} ms`;
+    this.elements.summaryDepthRange.value = `${nearCm} - ${farCm} cm`;
+    this.elements.summaryDepthRange.textContent = `${nearCm} - ${farCm} cm`;
+    this.elements.depthNearLabel.textContent = `NEAR ${nearCm} cm, 255`;
+    this.elements.depthFarLabel.textContent = `FAR ${farCm} cm, 0`;
+    this.elements.benchmarkPanel.hidden = this.sourceKind !== "bundle";
+  }
+
   updatePlayingState(isPlaying: boolean): void {
     this.elements.playLabel.textContent = isPlaying ? "일시정지" : "재생";
     this.elements.playIcon.textContent = isPlaying ? "Ⅱ" : "▶";
@@ -418,7 +563,9 @@ class ViewerController {
       HTMLButtonElement | HTMLInputElement | HTMLSelectElement
     >("[data-viewer-control]");
     for (const control of controls) {
-      control.disabled = !enabled;
+      control.disabled =
+        !enabled ||
+        (control === this.elements.benchmarkButton && this.bundleSource === null);
     }
   }
 

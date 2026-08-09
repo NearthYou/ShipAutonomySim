@@ -3,19 +3,31 @@ import test, { type TestContext } from "node:test";
 
 import {
   describeViewerError,
+  formatBenchmarkMetric,
   formatElapsed,
   FrameRenderError,
+  loadViewerSource,
   startViewer,
+  viewerSourceLabel,
 } from "../src/app.js";
+import { BundleError } from "../src/bundle.js";
+import type { BundleSequenceSource } from "../src/bundle.js";
 import { ManifestError } from "../src/manifest.js";
+import type { SequenceManifest } from "../src/manifest.js";
 import { FrameLoadError } from "../src/preload.js";
 import type { LoadableImage } from "../src/preload.js";
 
 const VIEWER_ELEMENT_IDS = [
   "color-canvas",
+  "benchmark-button",
+  "benchmark-panel",
+  "benchmark-random",
+  "benchmark-sequential",
   "depth-canvas",
+  "depth-far-label",
   "depth-mode",
   "depth-mode-badge",
+  "depth-near-label",
   "frame-readout",
   "frame-slider",
   "loading-label",
@@ -28,6 +40,10 @@ const VIEWER_ELEMENT_IDS = [
   "playback-speed",
   "previous-frame",
   "restart",
+  "source-badge",
+  "summary-depth-range",
+  "summary-frame-count",
+  "summary-interval",
   "time-readout",
   "viewer-error",
   "viewer-error-message",
@@ -160,6 +176,7 @@ function createFakeRoot(): FakeRoot {
   }
 
   for (const id of [
+    "benchmark-button",
     "depth-mode",
     "frame-slider",
     "next-frame",
@@ -215,7 +232,7 @@ async function createStartedViewer(t: TestContext) {
     frame_count: 2,
     interval_ms: 100,
     depth_near_cm: 0,
-    depth_far_cm: 5000,
+    depth_far_cm: 2500,
     frames: [
       { index: 0, color: "color_000000.png", depth: "depth_000000.png", time_ms: 0 },
       { index: 1, color: "color_000001.png", depth: "depth_000001.png", time_ms: 100 },
@@ -254,6 +271,104 @@ test("경과 시간을 분과 초 및 밀리초로 표시한다", () => {
   assert.equal(formatElapsed(0), "00:00.000");
   assert.equal(formatElapsed(61_234), "01:01.234");
   assert.equal(formatElapsed(3_661_007), "61:01.007");
+});
+
+const loadedManifest: SequenceManifest = {
+  frameCount: 1,
+  intervalMs: 100,
+  depthRange: { nearCm: 0, farCm: 2500 },
+  frames: [
+    {
+      index: 0,
+      timeMs: 0,
+      color: { kind: "color", sourcePath: "color.png", url: "blob:color" },
+      depth: { kind: "depth", sourcePath: "depth.png", url: "blob:depth" },
+    },
+  ],
+};
+
+test("bundle query가 있으면 SIV loader만 선택한다", async () => {
+  const calls: string[] = [];
+  const bundleSource: BundleSequenceSource = {
+    kind: "bundle",
+    sourceUrl: "https://viewer.test/data/sequence.siv",
+    manifest: loadedManifest,
+    assets: [],
+    objectUrls: [],
+    buffer: new ArrayBuffer(0),
+    payloadOffset: 0,
+    revoke() {},
+  };
+
+  const source = await loadViewerSource("?bundle=data/sequence.siv", {
+    pageUrl: "https://viewer.test/index.html",
+    manifestLoader: async (url) => {
+      calls.push(`manifest:${url}`);
+      return loadedManifest;
+    },
+    bundleLoader: async (url) => {
+      calls.push(`bundle:${url}`);
+      return bundleSource;
+    },
+  });
+
+  assert.equal(source.kind, "bundle");
+  assert.equal(source.manifest, loadedManifest);
+  assert.equal(source.bundleSource, bundleSource);
+  assert.deepEqual(calls, ["bundle:https://viewer.test/data/sequence.siv"]);
+});
+
+test("bundle query가 없으면 기존 manifest loader만 선택한다", async () => {
+  const calls: string[] = [];
+  const source = await loadViewerSource("", {
+    pageUrl: "https://viewer.test/index.html",
+    manifestLoader: async (url) => {
+      calls.push(`manifest:${url}`);
+      return loadedManifest;
+    },
+    bundleLoader: async (url) => {
+      calls.push(`bundle:${url}`);
+      throw new Error("호출되면 안 됩니다.");
+    },
+  });
+
+  assert.equal(source.kind, "manifest");
+  assert.equal(source.manifest, loadedManifest);
+  assert.equal(source.bundleSource, null);
+  assert.deepEqual(calls, ["manifest:./manifest.json"]);
+});
+
+test("비어 있거나 교차 출처인 bundle query를 거부한다", async () => {
+  await assert.rejects(
+    loadViewerSource("?bundle=", { pageUrl: "https://viewer.test/index.html" }),
+    BundleError,
+  );
+  await assert.rejects(
+    loadViewerSource("?bundle=https://other.test/sequence.siv", {
+      pageUrl: "https://viewer.test/index.html",
+    }),
+    BundleError,
+  );
+});
+
+test("source badge와 benchmark 결과를 짧고 명확하게 표시한다", () => {
+  assert.equal(viewerSourceLabel("bundle"), "SIV BINARY");
+  assert.equal(viewerSourceLabel("manifest"), "MANIFEST + PNG");
+  assert.equal(
+    formatBenchmarkMetric({ averageMsPerImage: 0.12567, sampleCount: 24, checksum: 9 }),
+    "0.126 ms/image, 24 samples",
+  );
+});
+
+test("manifest 모드는 요약을 표시하고 binary benchmark를 비활성화한다", async (t) => {
+  const { root } = await createStartedViewer(t);
+
+  assert.equal(root.getElementById("source-badge").textContent, "MANIFEST + PNG");
+  assert.equal(root.getElementById("summary-frame-count").textContent, "2");
+  assert.equal(root.getElementById("summary-interval").textContent, "100 ms");
+  assert.equal(root.getElementById("summary-depth-range").textContent, "0 - 2500 cm");
+  assert.equal(root.getElementById("benchmark-panel").hidden, true);
+  assert.equal(root.getElementById("benchmark-button").disabled, true);
 });
 
 test("manifest 오류에 원인과 확인할 파일을 안내한다", () => {

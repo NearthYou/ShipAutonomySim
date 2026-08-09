@@ -1,6 +1,7 @@
 /color_*.png
 /depth_*.png
 /manifest.json
+/sequence.siv
 /browser-artifacts/
 __pycache__/
 *.py[cod]

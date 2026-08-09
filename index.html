@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark">
-    <title>이미지 시퀀스 뷰어</title>
+    <title>선박 자율주행 캡처 뷰어</title>
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="./styles.css">
     <script type="module" src="./dist/src/app.js"></script>
@@ -13,9 +13,9 @@
     <div class="page-shell">
       <header class="page-header">
         <div>
-          <p class="eyebrow">IMAGE SEQUENCE VIEWER</p>
-          <h1>Image Sequence Viewer</h1>
-          <p class="page-description">컬러와 깊이 프레임을 같은 시간축에서 확인합니다.</p>
+          <p class="eyebrow">SHIP AUTONOMY DATASET</p>
+          <h1>선박 자율주행 캡처 뷰어</h1>
+          <p class="page-description">선박 전방의 컬러와 깊이 프레임을 같은 시간축에서 검증합니다.</p>
         </div>
         <div class="load-card" id="loading-panel" aria-live="polite">
           <div class="load-card__heading">
@@ -32,6 +32,25 @@
       </section>
 
       <main>
+        <section class="sequence-summary" aria-label="캡처 데이터 요약">
+          <div class="summary-item summary-item--source">
+            <span class="readout-label">데이터 출처</span>
+            <span class="source-badge" id="source-badge">MANIFEST + PNG</span>
+          </div>
+          <div class="summary-item">
+            <span class="readout-label">프레임 수</span>
+            <output id="summary-frame-count">0</output>
+          </div>
+          <div class="summary-item">
+            <span class="readout-label">목표 간격</span>
+            <output id="summary-interval">0 ms</output>
+          </div>
+          <div class="summary-item">
+            <span class="readout-label">깊이 범위</span>
+            <output id="summary-depth-range">0 - 0 cm</output>
+          </div>
+        </section>
+
         <section class="readout-bar" aria-label="현재 재생 정보">
           <div class="readout-item">
             <span class="readout-label">프레임</span>
@@ -71,6 +90,11 @@
             <div class="canvas-stage">
               <canvas id="depth-canvas" width="640" height="360" aria-label="현재 깊이 프레임"></canvas>
               <span class="canvas-placeholder" aria-hidden="true">DEPTH</span>
+            </div>
+            <div class="depth-scale" aria-label="깊이 밝기 방향">
+              <span id="depth-near-label">NEAR 0 cm, 255</span>
+              <span class="depth-scale__bar" aria-hidden="true"></span>
+              <span id="depth-far-label">FAR 2500 cm, 0</span>
             </div>
           </article>
         </section>
@@ -114,11 +138,32 @@
             </div>
           </div>
         </section>
+
+        <section class="benchmark-card" id="benchmark-panel" aria-labelledby="benchmark-title" hidden>
+          <div class="benchmark-card__heading">
+            <div>
+              <p class="eyebrow">SIV INDEX BENCHMARK</p>
+              <h2 id="benchmark-title">압축 이미지 bytes 접근 성능</h2>
+            </div>
+            <button id="benchmark-button" data-viewer-control type="button" disabled>접근 성능 측정</button>
+          </div>
+          <div class="benchmark-results" aria-live="polite">
+            <div>
+              <span class="readout-label">순차 접근</span>
+              <output id="benchmark-sequential">측정 전</output>
+            </div>
+            <div>
+              <span class="readout-label">고정 seed 무작위 접근</span>
+              <output id="benchmark-random">측정 전</output>
+            </div>
+          </div>
+          <p class="benchmark-note">PNG decode와 캔버스 렌더링을 제외하고 SIV 내부의 압축 PNG bytes를 복사하는 시간만 측정합니다.</p>
+        </section>
       </main>
 
       <footer class="page-footer">
-        <span>STATIC CANVAS VIEWER</span>
-        <span>MANIFEST DRIVEN</span>
+        <span>UE 5.5.4 CAPTURE PIPELINE</span>
+        <span>MANIFEST + SIV</span>
       </footer>
     </div>
   </body>

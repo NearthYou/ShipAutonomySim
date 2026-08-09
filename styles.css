@@ -10,6 +10,7 @@
   --muted: #8f99a5;
   --accent: #ff5a1f;
   --accent-hover: #ff7645;
+  --data: #38d9c5;
   --danger: #ff6b6b;
   --focus: #ffb199;
 }
@@ -115,7 +116,8 @@ p {
 
 h1 {
   margin-bottom: 8px;
-  font-size: clamp(2rem, 5vw, 4.8rem);
+  max-width: 900px;
+  font-size: clamp(2rem, 4.5vw, 4rem);
   font-weight: 760;
   letter-spacing: -0.055em;
   line-height: 0.98;
@@ -195,6 +197,45 @@ progress::-moz-progress-bar {
   margin-bottom: 0;
   color: #ffd5d5;
   line-height: 1.6;
+}
+
+.sequence-summary {
+  display: grid;
+  grid-template-columns: minmax(210px, 1.35fr) repeat(3, minmax(140px, 1fr));
+  margin-top: 18px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+}
+
+.summary-item {
+  display: grid;
+  align-content: center;
+  gap: 8px;
+  min-height: 82px;
+  padding: 16px 18px;
+  border-right: 1px solid var(--line);
+}
+
+.summary-item:last-child {
+  border-right: 0;
+}
+
+.summary-item output {
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 1rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.source-badge {
+  width: fit-content;
+  padding: 5px 8px;
+  border: 1px solid color-mix(in srgb, var(--data) 55%, var(--line));
+  color: var(--data);
+  background: color-mix(in srgb, var(--data) 8%, transparent);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
 }
 
 .readout-bar {
@@ -292,6 +333,25 @@ progress::-moz-progress-bar {
   object-fit: contain;
 }
 
+.depth-scale {
+  display: grid;
+  grid-template-columns: max-content minmax(80px, 1fr) max-content;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 16px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 0.67rem;
+  letter-spacing: 0.04em;
+}
+
+.depth-scale__bar {
+  height: 6px;
+  border: 1px solid var(--line-strong);
+  background: linear-gradient(90deg, #ffffff, #000000);
+}
+
 .canvas-placeholder {
   position: absolute;
   color: #252a30;
@@ -362,6 +422,59 @@ input[type="range"] {
   padding: 0 32px 0 12px;
 }
 
+.benchmark-card {
+  margin-top: 14px;
+  padding: 20px;
+  border: 1px solid color-mix(in srgb, var(--data) 30%, var(--line));
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--data) 7%, transparent), transparent 55%),
+    var(--surface);
+}
+
+.benchmark-card__heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.benchmark-card h2 {
+  margin: 5px 0 0;
+  font-size: 1.1rem;
+}
+
+.benchmark-card button {
+  border-color: color-mix(in srgb, var(--data) 55%, var(--line));
+}
+
+.benchmark-results {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin-top: 18px;
+  background: var(--line);
+}
+
+.benchmark-results > div {
+  display: grid;
+  gap: 8px;
+  padding: 15px;
+  background: var(--surface-raised);
+}
+
+.benchmark-results output {
+  color: var(--data);
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.benchmark-note {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.6;
+}
+
 .page-footer {
   display: flex;
   justify-content: space-between;
@@ -378,6 +491,23 @@ input[type="range"] {
 
   .load-card {
     width: 100%;
+  }
+
+  .sequence-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .summary-item:nth-child(2) {
+    border-right: 0;
+  }
+
+  .summary-item:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--line);
+  }
+
+  .benchmark-card__heading {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .settings-group {
@@ -426,6 +556,37 @@ input[type="range"] {
 
   .transport {
     padding: 14px;
+  }
+
+  .sequence-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .summary-item,
+  .summary-item:nth-child(2) {
+    min-height: 70px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .summary-item:last-child {
+    border-bottom: 0;
+  }
+
+  .depth-scale {
+    grid-template-columns: 1fr;
+  }
+
+  .depth-scale__bar {
+    grid-row: 2;
+  }
+
+  .depth-scale span:last-child {
+    text-align: right;
+  }
+
+  .benchmark-results {
+    grid-template-columns: 1fr;
   }
 
   .settings-group {
