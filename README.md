@@ -122,4 +122,54 @@ manifest 내용이 잘못되었다는 메시지가 보이면 화면에 표시된
 - `scripts/generate_dummy_data.py`: 표준 라이브러리 더미 데이터 생성기
 - `tests/`: TypeScript와 Python 자동 검사
 
-이 저장소에는 정적 이미지 시퀀스 웹 뷰어와 별도의 Unreal Engine 5.5.4 과제 경로인 `ShipAutonomySim`이 함께 있습니다. Unreal 과제는 `/Game/Maps/MainLevel`과 Stage 3 수동 선박 이동이 준비된 상태이며, 코스 생성과 자율주행을 연결하는 Stage 4가 이번 구현 범위입니다.
+## Unreal Stage 5 데이터 캡처
+
+이 저장소에는 정적 이미지 시퀀스 웹 뷰어와 Unreal Engine 5.5.4 과제 경로인 `ShipAutonomySim`이 함께 있습니다. `/Game/Maps/MainLevel`에서 Play하면 코스 생성, 자율주행과 Stage 5 컬러와 깊이 캡처가 입력 없이 자동으로 시작됩니다.
+
+캡처 결과는 실행마다 다음 형식의 고유 디렉터리에 저장됩니다.
+
+```text
+ShipAutonomySim/Saved/ShipCaptures/YYYYMMDDTHHMMSSmmmZ_GUIDDIGITS/
+├── color_000000.png
+├── depth_000000.png
+├── ...
+└── manifest.json
+```
+
+컬러와 깊이는 같은 6자리 index를 공유하는 512×512 PNG pair입니다. `manifest.json`은 `capture_resolution`, `depth_far_cm`, `depth_near_cm`, `frame_count`, `frames`, `interval_ms`, `result`, `wall_slide_cm`의 정확한 여덟 최상위 필드를 가집니다. `frames`의 각 항목에는 `color`, `depth`, `index`, `time_ms`만 들어갑니다. 웹 뷰어는 이 manifest의 공통 재생 필드를 그대로 읽으므로 제품 소스를 수정할 필요가 없습니다.
+
+실제 run을 확인할 때는 저장소 루트에서 `<run-directory>`를 선택한 디렉터리명으로 바꾼 뒤 다음 PowerShell을 실행합니다. 같은 이름의 루트 파일이 하나라도 있으면 아무것도 덮어쓰지 않고 중단합니다.
+
+```powershell
+$Run = 'ShipAutonomySim\Saved\ShipCaptures\<run-directory>'
+$SourceFiles = @(
+    Get-Item -LiteralPath (Join-Path $Run 'manifest.json')
+    Get-ChildItem -LiteralPath $Run -File -Filter 'color_*.png'
+    Get-ChildItem -LiteralPath $Run -File -Filter 'depth_*.png'
+)
+if (@($SourceFiles | Where-Object Name -Like 'color_*.png').Count -eq 0 -or
+    @($SourceFiles | Where-Object Name -Like 'depth_*.png').Count -eq 0) {
+    throw '선택한 run에 컬러 또는 깊이 프레임이 없습니다.'
+}
+$Destination = (Resolve-Path '.').Path
+$Collisions = @($SourceFiles | Where-Object {
+    Test-Path -LiteralPath (Join-Path $Destination $_.Name)
+})
+if ($Collisions.Count -ne 0) {
+    throw "루트에 같은 이름의 파일이 있습니다: $($Collisions.Name -join ', ')"
+}
+$CopiedPaths = @($SourceFiles | ForEach-Object {
+    $Target = Join-Path $Destination $_.Name
+    Copy-Item -LiteralPath $_.FullName -Destination $Target
+    $Target
+})
+python -m http.server 8000
+```
+
+브라우저에서 `http://localhost:8000`을 열어 재생, 프레임 이동, 컬러와 깊이의 동기 index와 시간, 깊이 원본과 컬러맵 전환을 확인합니다. 확인이 끝나면 서버 터미널에서 `Ctrl+C`를 누르고, 같은 PowerShell 세션에서 이번에 복사한 파일만 정리합니다. `Saved`의 원본 run은 삭제하지 않습니다.
+
+```powershell
+$CopiedPaths | ForEach-Object {
+    Remove-Item -LiteralPath $_
+}
+```
