@@ -112,7 +112,10 @@ private:
         FrameRename,
         PairCleanup,
         FrameRecord,
-        InvalidClock
+        InvalidClock,
+        ManifestSerialize,
+        ManifestWrite,
+        ManifestRename
     };
 
     UPROPERTY(EditAnywhere, Category=Capture)
@@ -161,8 +164,14 @@ private:
     FString RunRelativePath;
     TArray<FShipCaptureFrameRecord> Frames;
     int32 NextFrameIndex = 0;
+    double CapturedWallSlideCm = 0.0;
     double FirstCaptureSeconds = 0.0;
+    double LastClockSeconds = 0.0;
+    double AccumulatedRealSeconds = 0.0;
+    int64 LastCommittedTimeMs = 0;
     bool bPairCleanupFailureLatched = false;
+    int32 FinalizeAttemptCount = 0;
+    TArray<double> TransactionDurationsMs;
 
     bool SetupCaptureRig();
     bool HasOpticalEquality() const;
@@ -186,6 +195,10 @@ private:
         const FString& DepthFinalPath);
     bool StartCaptureAt(double WallSlideCm, double NowSeconds);
     void TickAtTime(double NowSeconds);
+    bool WriteManifest(bool bSimulationSucceeded);
+    bool CleanupManifestPaths(
+        const FString& ManifestTempPath,
+        const FString& ManifestFinalPath);
 
 #if WITH_DEV_AUTOMATION_TESTS
     EShipCaptureTestFailurePoint TestFailurePoint =
@@ -195,6 +208,7 @@ private:
     int64 TestColorReadbackPixelCount = 0;
     int64 TestDepthReadbackPixelCount = 0;
     TArray<FLinearColor> TestRawDepthSamples;
+    int32 TestFailureLogCount = 0;
     friend struct FShipCaptureAutomationAccessor;
 #endif
 };
@@ -221,5 +235,13 @@ struct FShipCaptureAutomationAccessor
     static void TickAt(UShipCapture& Capture, double NowSeconds);
     static FString RunDirectory(const UShipCapture& Capture);
     static int32 CommittedFrameCount(const UShipCapture& Capture);
+    static int32 FinalizeAttemptCount(const UShipCapture& Capture);
+    static int32 FailureLogCount(const UShipCapture& Capture);
+    static int32 CaptureResolution(const UShipCapture& Capture);
+    static int32 CaptureIntervalMs(const UShipCapture& Capture);
+    static float CaptureFovDegrees(const UShipCapture& Capture);
+    static bool HasOpticalEquality(const UShipCapture& Capture);
+    static TArray<double> TransactionDurationsMs(
+        const UShipCapture& Capture);
 };
 #endif

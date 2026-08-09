@@ -3,17 +3,21 @@
 
 #include "Components/SceneCaptureComponent2D.h"
 #include "Components/StaticMeshComponent.h"
+#include "Dom/JsonObject.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/World.h"
 #include "IImageWrapperModule.h"
 #include "ImageCore.h"
 #include "HAL/FileManager.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
 #include "ShipCapture.h"
 #include "ShipCaptureSimulation.h"
 #include "ShipPawn.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 #include "UObject/UObjectGlobals.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -44,6 +48,16 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     FShipCapturePairPublicationTest,
     "ShipAutonomySim.ShipCapture.File.PairPublication",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipCaptureLifecycleTest,
+    "ShipAutonomySim.ShipCapture.Component.Lifecycle",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipCaptureManifestFinalizationTest,
+    "ShipAutonomySim.ShipCapture.Manifest.Finalization",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
 namespace
@@ -492,6 +506,10 @@ bool FShipCaptureRigConfigurationTest::RunTest(const FString& Parameters)
 bool FShipCaptureReadbackAndEncodingTest::RunTest(const FString& Parameters)
 {
     (void)Parameters;
+    AddExpectedError(
+        TEXT("Stage5CaptureFailure"),
+        EAutomationExpectedErrorFlags::Contains,
+        1);
 
     FScopedShipCaptureTestWorld TestWorld;
     UStaticMesh* CubeMesh = LoadObject<UStaticMesh>(
@@ -660,6 +678,10 @@ bool FShipCaptureReadbackAndEncodingTest::RunTest(const FString& Parameters)
 bool FShipCapturePairPublicationTest::RunTest(const FString& Parameters)
 {
     (void)Parameters;
+    AddExpectedError(
+        TEXT("Stage5CaptureFailure"),
+        EAutomationExpectedErrorFlags::Contains,
+        4);
 
     FScopedAutomationCaptureCleanup Cleanup;
     FScopedShipCaptureTestWorld TestWorld;
@@ -861,6 +883,516 @@ bool FShipCapturePairPublicationTest::RunTest(const FString& Parameters)
         Cleanup.Cleanup());
     TestEqual(
         TEXT("Pre-existing Automation children are preserved"),
+        FString::Join(Cleanup.DirectChildDirectories(), TEXT("|")),
+        FString::Join(Cleanup.PreExistingChildren, TEXT("|")));
+    return !HasAnyErrors();
+}
+
+bool FShipCaptureLifecycleTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    AddExpectedError(
+        TEXT("Stage5CaptureFailure"),
+        EAutomationExpectedErrorFlags::Contains,
+        1);
+
+    FScopedAutomationCaptureCleanup Cleanup;
+    FScopedShipCaptureTestWorld TestWorld;
+    AShipPawn* BeforeStartPawn = TestWorld.World->SpawnActor<AShipPawn>();
+    check(BeforeStartPawn != nullptr && BeforeStartPawn->GetCapture() != nullptr);
+    UShipCapture& BeforeStartCapture = *BeforeStartPawn->GetCapture();
+    BeforeStartCapture.StopAndFinalize(false);
+    TestTrue(
+        TEXT("Finalize before start creates no run directory"),
+        FShipCaptureAutomationAccessor::RunDirectory(BeforeStartCapture)
+            .IsEmpty());
+    TestEqual(
+        TEXT("Finalize before start creates no Automation child"),
+        Cleanup.DirectChildDirectories().Num(),
+        Cleanup.PreExistingChildren.Num());
+    TestEqual(
+        TEXT("Finalize before start makes no attempt"),
+        FShipCaptureAutomationAccessor::FinalizeAttemptCount(
+            BeforeStartCapture),
+        0);
+
+    UStaticMesh* CubeMesh = LoadObject<UStaticMesh>(
+        nullptr,
+        TEXT("/Engine/BasicShapes/Cube.Cube"));
+    AStaticMeshActor* Cube = TestWorld.World->SpawnActor<AStaticMeshActor>();
+    check(CubeMesh != nullptr && Cube != nullptr);
+    Cube->GetStaticMeshComponent()->SetStaticMesh(CubeMesh);
+    Cube->SetActorLocation(FVector(600.0, 0.0, 50.0));
+    Cube->SetActorScale3D(FVector(1.0, 4.0, 4.0));
+
+    AShipPawn* Pawn = TestWorld.World->SpawnActor<AShipPawn>();
+    check(Pawn != nullptr && Pawn->GetCapture() != nullptr);
+    UShipCapture& Capture = *Pawn->GetCapture();
+    FShipCaptureAutomationAccessor::SetCaptureResolution(Capture, 32);
+    TestTrue(
+        TEXT("First start succeeds"),
+        FShipCaptureAutomationAccessor::StartCaptureAt(
+            Capture,
+            125.0,
+            100.0));
+    const FString RunDirectory =
+        FShipCaptureAutomationAccessor::RunDirectory(Capture);
+    TestTrue(TEXT("Lifecycle run is tracked"), Cleanup.Track(RunDirectory));
+    TestEqual(
+        TEXT("Start commits frame zero immediately"),
+        FShipCaptureAutomationAccessor::CommittedFrameCount(Capture),
+        1);
+    TestTrue(TEXT("Capture is active after frame zero"), Capture.IsCaptureActive());
+    TestTrue(TEXT("Tick is enabled after frame zero"), Capture.IsComponentTickEnabled());
+
+    TestFalse(
+        TEXT("Duplicate start is rejected"),
+        FShipCaptureAutomationAccessor::StartCaptureAt(
+            Capture,
+            125.0,
+            101.0));
+    TestEqual(
+        TEXT("Duplicate start preserves the run directory"),
+        FShipCaptureAutomationAccessor::RunDirectory(Capture),
+        RunDirectory);
+    TestEqual(
+        TEXT("Duplicate start creates no frame"),
+        FShipCaptureAutomationAccessor::CommittedFrameCount(Capture),
+        1);
+    TestEqual(
+        TEXT("Duplicate start creates no directory"),
+        Cleanup.DirectChildDirectories().Num(),
+        Cleanup.PreExistingChildren.Num() + 1);
+
+    FShipCaptureAutomationAccessor::TickAt(Capture, 100.099);
+    TestEqual(
+        TEXT("Ninety-nine milliseconds commits no frame"),
+        FShipCaptureAutomationAccessor::CommittedFrameCount(Capture),
+        1);
+    FShipCaptureAutomationAccessor::TickAt(Capture, 100.100);
+    TestEqual(
+        TEXT("One hundred milliseconds commits frame one"),
+        FShipCaptureAutomationAccessor::CommittedFrameCount(Capture),
+        2);
+    FShipCaptureAutomationAccessor::TickAt(Capture, 100.550);
+    TestEqual(
+        TEXT("A 550 ms hitch commits only one frame"),
+        FShipCaptureAutomationAccessor::CommittedFrameCount(Capture),
+        3);
+    FShipCaptureAutomationAccessor::TickAt(Capture, 100.550);
+    TestEqual(
+        TEXT("The same hitch clock cannot catch up"),
+        FShipCaptureAutomationAccessor::CommittedFrameCount(Capture),
+        3);
+    TestEqual(
+        TEXT("Successful pairs record three transaction durations"),
+        FShipCaptureAutomationAccessor::TransactionDurationsMs(Capture).Num(),
+        3);
+
+    const FString ManifestPath = RunDirectory / TEXT("manifest.json");
+    TestFalse(
+        TEXT("Manifest is absent before terminal"),
+        IFileManager::Get().FileExists(*ManifestPath));
+    FShipCaptureAutomationAccessor::TickAt(Capture, 100.540);
+    TestTrue(TEXT("Clock rollback latches capture failure"), Capture.HasCaptureFailure());
+    TestFalse(TEXT("Clock failure disables tick"), Capture.IsComponentTickEnabled());
+    TestEqual(
+        TEXT("Clock failure is logged once"),
+        FShipCaptureAutomationAccessor::FailureLogCount(Capture),
+        1);
+    TestFalse(
+        TEXT("Clock failure still waits for terminal manifest"),
+        IFileManager::Get().FileExists(*ManifestPath));
+
+    Capture.StopAndFinalize(false);
+    TestTrue(
+        TEXT("Terminal finalizes the failed run"),
+        IFileManager::Get().FileSize(*ManifestPath) > 0);
+    TestEqual(
+        TEXT("Lifecycle finalizes exactly once"),
+        FShipCaptureAutomationAccessor::FinalizeAttemptCount(Capture),
+        1);
+    FString ManifestText;
+    TSharedPtr<FJsonObject> ManifestObject;
+    TestTrue(
+        TEXT("Lifecycle manifest loads"),
+        FFileHelper::LoadFileToString(ManifestText, *ManifestPath));
+    const TSharedRef<TJsonReader<>> Reader =
+        TJsonReaderFactory<>::Create(ManifestText);
+    TestTrue(
+        TEXT("Lifecycle manifest parses"),
+        FJsonSerializer::Deserialize(Reader, ManifestObject) &&
+            ManifestObject.IsValid());
+    if (ManifestObject.IsValid())
+    {
+        const TArray<TSharedPtr<FJsonValue>>* FrameValues = nullptr;
+        TestTrue(
+            TEXT("Lifecycle manifest has frames"),
+            ManifestObject->TryGetArrayField(TEXT("frames"), FrameValues) &&
+                FrameValues != nullptr);
+        if (FrameValues != nullptr && FrameValues->Num() == 3)
+        {
+            int64 TimeZero = -1;
+            int64 TimeOne = -1;
+            int64 TimeTwo = -1;
+            (*FrameValues)[0]->AsObject()->TryGetNumberField(
+                TEXT("time_ms"), TimeZero);
+            (*FrameValues)[1]->AsObject()->TryGetNumberField(
+                TEXT("time_ms"), TimeOne);
+            (*FrameValues)[2]->AsObject()->TryGetNumberField(
+                TEXT("time_ms"), TimeTwo);
+            TestEqual(TEXT("Frame zero time is zero"), TimeZero, int64{0});
+            TestEqual(TEXT("Frame one time is actual 100 ms"), TimeOne, int64{100});
+            TestEqual(TEXT("Hitch frame time is actual 550 ms"), TimeTwo, int64{550});
+            TestTrue(
+                TEXT("Lifecycle timestamps increase strictly"),
+                TimeZero < TimeOne && TimeOne < TimeTwo);
+        }
+        else
+        {
+            AddError(TEXT("Lifecycle manifest must contain exactly three frames"));
+        }
+    }
+
+    TestTrue(TEXT("Lifecycle run cleanup succeeds"), Cleanup.Cleanup());
+    TestEqual(
+        TEXT("Lifecycle cleanup preserves pre-existing children"),
+        FString::Join(Cleanup.DirectChildDirectories(), TEXT("|")),
+        FString::Join(Cleanup.PreExistingChildren, TEXT("|")));
+    return !HasAnyErrors();
+}
+
+bool FShipCaptureManifestFinalizationTest::RunTest(
+    const FString& Parameters)
+{
+    (void)Parameters;
+    AddExpectedError(
+        TEXT("Stage5CaptureFailure"),
+        EAutomationExpectedErrorFlags::Contains,
+        1);
+
+    FScopedAutomationCaptureCleanup Cleanup;
+    FScopedShipCaptureTestWorld TestWorld;
+    UStaticMesh* CubeMesh = LoadObject<UStaticMesh>(
+        nullptr,
+        TEXT("/Engine/BasicShapes/Cube.Cube"));
+    AStaticMeshActor* Cube = TestWorld.World->SpawnActor<AStaticMeshActor>();
+    check(CubeMesh != nullptr && Cube != nullptr);
+    Cube->GetStaticMeshComponent()->SetStaticMesh(CubeMesh);
+    Cube->SetActorLocation(FVector(600.0, 0.0, 50.0));
+    Cube->SetActorScale3D(FVector(1.0, 4.0, 4.0));
+
+    const auto ValidateManifest = [this](
+        const FString& RunDirectory,
+        const FString& ExpectedResult,
+        double ExpectedSlideCm,
+        int32 ExpectedFrameCount)
+    {
+        const FString ManifestPath = RunDirectory / TEXT("manifest.json");
+        FString JsonText;
+        TSharedPtr<FJsonObject> Root;
+        if (!TestTrue(
+                TEXT("Manifest file loads"),
+                FFileHelper::LoadFileToString(JsonText, *ManifestPath)))
+        {
+            return false;
+        }
+        const TSharedRef<TJsonReader<>> Reader =
+            TJsonReaderFactory<>::Create(JsonText);
+        if (!TestTrue(
+                TEXT("Manifest JSON parses"),
+                FJsonSerializer::Deserialize(Reader, Root) &&
+                    Root.IsValid()))
+        {
+            return false;
+        }
+
+        TArray<FString> ActualTopKeys;
+        Root->Values.GetKeys(ActualTopKeys);
+        ActualTopKeys.Sort();
+        TArray<FString> ExpectedTopKeys{
+            TEXT("capture_resolution"),
+            TEXT("depth_far_cm"),
+            TEXT("depth_near_cm"),
+            TEXT("frame_count"),
+            TEXT("frames"),
+            TEXT("interval_ms"),
+            TEXT("result"),
+            TEXT("wall_slide_cm")};
+        ExpectedTopKeys.Sort();
+        TestEqual(
+            TEXT("Manifest has the exact eight top-level keys"),
+            FString::Join(ActualTopKeys, TEXT("|")),
+            FString::Join(ExpectedTopKeys, TEXT("|")));
+
+        int32 FrameCount = -1;
+        int32 IntervalMs = -1;
+        double NearCm = -1.0;
+        double FarCm = -1.0;
+        double SlideCm = 0.0;
+        FString Result;
+        TestTrue(
+            TEXT("Manifest frame_count is numeric"),
+            Root->TryGetNumberField(TEXT("frame_count"), FrameCount));
+        TestTrue(
+            TEXT("Manifest interval_ms is numeric"),
+            Root->TryGetNumberField(TEXT("interval_ms"), IntervalMs));
+        TestTrue(
+            TEXT("Manifest depth_near_cm is numeric"),
+            Root->TryGetNumberField(TEXT("depth_near_cm"), NearCm));
+        TestTrue(
+            TEXT("Manifest depth_far_cm is numeric"),
+            Root->TryGetNumberField(TEXT("depth_far_cm"), FarCm));
+        TestTrue(
+            TEXT("Manifest wall_slide_cm is numeric"),
+            Root->TryGetNumberField(TEXT("wall_slide_cm"), SlideCm));
+        TestTrue(
+            TEXT("Manifest result is a string"),
+            Root->TryGetStringField(TEXT("result"), Result));
+        TestEqual(TEXT("Manifest frame count"), FrameCount, ExpectedFrameCount);
+        TestEqual(TEXT("Manifest target interval"), IntervalMs, 100);
+        TestEqual(TEXT("Manifest depth near"), NearCm, 0.0);
+        TestEqual(TEXT("Manifest depth far"), FarCm, 5000.0);
+        TestEqual(TEXT("Manifest wall slide"), SlideCm, ExpectedSlideCm);
+        TestEqual(TEXT("Manifest result"), Result, ExpectedResult);
+
+        const TArray<TSharedPtr<FJsonValue>>* ResolutionValues = nullptr;
+        TestTrue(
+            TEXT("Manifest resolution is an array"),
+            Root->TryGetArrayField(
+                TEXT("capture_resolution"),
+                ResolutionValues) &&
+                ResolutionValues != nullptr);
+        if (ResolutionValues != nullptr && ResolutionValues->Num() == 2)
+        {
+            TestEqual(
+                TEXT("Manifest width"),
+                (*ResolutionValues)[0]->AsNumber(),
+                32.0);
+            TestEqual(
+                TEXT("Manifest height"),
+                (*ResolutionValues)[1]->AsNumber(),
+                32.0);
+        }
+        else
+        {
+            AddError(TEXT("Manifest resolution must have exactly two values"));
+        }
+
+        const TArray<TSharedPtr<FJsonValue>>* FrameValues = nullptr;
+        TestTrue(
+            TEXT("Manifest frames is an array"),
+            Root->TryGetArrayField(TEXT("frames"), FrameValues) &&
+                FrameValues != nullptr);
+        if (FrameValues == nullptr)
+        {
+            return false;
+        }
+        TestEqual(
+            TEXT("Manifest frames match frame_count"),
+            FrameValues->Num(),
+            ExpectedFrameCount);
+        int64 PreviousTimeMs = -1;
+        for (int32 ExpectedIndex = 0;
+             ExpectedIndex < FrameValues->Num();
+             ++ExpectedIndex)
+        {
+            const TSharedPtr<FJsonValue>& FrameValue =
+                (*FrameValues)[ExpectedIndex];
+            if (!FrameValue.IsValid() ||
+                FrameValue->Type != EJson::Object)
+            {
+                AddError(FString::Printf(
+                    TEXT("Frame %d is not an object"),
+                    ExpectedIndex));
+                continue;
+            }
+            const TSharedPtr<FJsonObject> FrameObject =
+                FrameValue->AsObject();
+            TArray<FString> ActualFrameKeys;
+            FrameObject->Values.GetKeys(ActualFrameKeys);
+            ActualFrameKeys.Sort();
+            TArray<FString> ExpectedFrameKeys{
+                TEXT("color"),
+                TEXT("depth"),
+                TEXT("index"),
+                TEXT("time_ms")};
+            ExpectedFrameKeys.Sort();
+            TestEqual(
+                *FString::Printf(
+                    TEXT("Frame %d has exact keys"),
+                    ExpectedIndex),
+                FString::Join(ActualFrameKeys, TEXT("|")),
+                FString::Join(ExpectedFrameKeys, TEXT("|")));
+            int32 Index = INDEX_NONE;
+            int64 TimeMs = -1;
+            FString ColorLeafName;
+            FString DepthLeafName;
+            FrameObject->TryGetNumberField(TEXT("index"), Index);
+            FrameObject->TryGetNumberField(TEXT("time_ms"), TimeMs);
+            FrameObject->TryGetStringField(
+                TEXT("color"),
+                ColorLeafName);
+            FrameObject->TryGetStringField(
+                TEXT("depth"),
+                DepthLeafName);
+            FString ExpectedColorLeafName;
+            FString ExpectedDepthLeafName;
+            MakeCaptureFrameLeafNames(
+                ExpectedIndex,
+                ExpectedColorLeafName,
+                ExpectedDepthLeafName);
+            TestEqual(TEXT("Frame index is contiguous"), Index, ExpectedIndex);
+            TestEqual(
+                TEXT("Frame color leaf is exact"),
+                ColorLeafName,
+                ExpectedColorLeafName);
+            TestEqual(
+                TEXT("Frame depth leaf is exact"),
+                DepthLeafName,
+                ExpectedDepthLeafName);
+            TestTrue(
+                TEXT("Frame color pair exists"),
+                IFileManager::Get().FileSize(
+                    *(RunDirectory / ColorLeafName)) > 0);
+            TestTrue(
+                TEXT("Frame depth pair exists"),
+                IFileManager::Get().FileSize(
+                    *(RunDirectory / DepthLeafName)) > 0);
+            TestTrue(
+                TEXT("Frame timestamp increases strictly"),
+                ExpectedIndex == 0
+                    ? TimeMs == 0
+                    : TimeMs > PreviousTimeMs);
+            PreviousTimeMs = TimeMs;
+        }
+        return true;
+    };
+
+    AShipPawn* SuccessPawn = TestWorld.World->SpawnActor<AShipPawn>();
+    check(SuccessPawn != nullptr && SuccessPawn->GetCapture() != nullptr);
+    UShipCapture& SuccessCapture = *SuccessPawn->GetCapture();
+    FShipCaptureAutomationAccessor::SetCaptureResolution(SuccessCapture, 32);
+    TestTrue(
+        TEXT("Success run starts"),
+        FShipCaptureAutomationAccessor::StartCaptureAt(
+            SuccessCapture,
+            125.0,
+            500.0));
+    FShipCaptureAutomationAccessor::TickAt(SuccessCapture, 500.137);
+    const FString SuccessRunDirectory =
+        FShipCaptureAutomationAccessor::RunDirectory(SuccessCapture);
+    TestTrue(TEXT("Success run is tracked"), Cleanup.Track(SuccessRunDirectory));
+    SuccessCapture.StopAndFinalize(true);
+    TestTrue(
+        TEXT("Success manifest matches exact schema"),
+        ValidateManifest(SuccessRunDirectory, TEXT("success"), 125.0, 2));
+
+    const FString SuccessManifestPath =
+        SuccessRunDirectory / TEXT("manifest.json");
+    TArray64<uint8> OriginalManifestBytes;
+    TestTrue(
+        TEXT("Success manifest bytes load"),
+        FFileHelper::LoadFileToArray(
+            OriginalManifestBytes,
+            *SuccessManifestPath));
+    const FDateTime OriginalModifiedTime =
+        IFileManager::Get().GetTimeStamp(*SuccessManifestPath);
+    const int32 FinalizeCount =
+        FShipCaptureAutomationAccessor::FinalizeAttemptCount(SuccessCapture);
+    SuccessCapture.StopAndFinalize(false);
+    SuccessPawn->DispatchBeginPlay();
+    TestTrue(
+        TEXT("Success capture component has begun play before EndPlay"),
+        SuccessCapture.HasBegunPlay());
+    SuccessCapture.EndPlay(EEndPlayReason::Quit);
+    TArray64<uint8> RepeatedManifestBytes;
+    TestTrue(
+        TEXT("Repeated manifest bytes load"),
+        FFileHelper::LoadFileToArray(
+            RepeatedManifestBytes,
+            *SuccessManifestPath));
+    TestTrue(
+        TEXT("Duplicate finalize preserves manifest bytes"),
+        OriginalManifestBytes == RepeatedManifestBytes);
+    TestEqual(
+        TEXT("Duplicate finalize preserves modified time"),
+        IFileManager::Get().GetTimeStamp(*SuccessManifestPath),
+        OriginalModifiedTime);
+    TestEqual(
+        TEXT("Duplicate finalize and EndPlay make no new attempt"),
+        FShipCaptureAutomationAccessor::FinalizeAttemptCount(
+            SuccessCapture),
+        FinalizeCount);
+
+    AShipPawn* FailPawn = TestWorld.World->SpawnActor<AShipPawn>();
+    check(FailPawn != nullptr && FailPawn->GetCapture() != nullptr);
+    UShipCapture& FailCapture = *FailPawn->GetCapture();
+    FShipCaptureAutomationAccessor::SetCaptureResolution(FailCapture, 32);
+    TestTrue(
+        TEXT("Fail-result run starts"),
+        FShipCaptureAutomationAccessor::StartCaptureAt(
+            FailCapture,
+            -500.0,
+            600.0));
+    const FString FailRunDirectory =
+        FShipCaptureAutomationAccessor::RunDirectory(FailCapture);
+    TestTrue(TEXT("Fail-result run is tracked"), Cleanup.Track(FailRunDirectory));
+    FailCapture.StopAndFinalize(false);
+    TestTrue(
+        TEXT("Fail manifest matches exact schema"),
+        ValidateManifest(FailRunDirectory, TEXT("fail"), -500.0, 1));
+
+    AShipPawn* WriteFailurePawn = TestWorld.World->SpawnActor<AShipPawn>();
+    check(WriteFailurePawn != nullptr &&
+        WriteFailurePawn->GetCapture() != nullptr);
+    UShipCapture& WriteFailureCapture = *WriteFailurePawn->GetCapture();
+    FShipCaptureAutomationAccessor::SetCaptureResolution(
+        WriteFailureCapture,
+        32);
+    TestTrue(
+        TEXT("Manifest-write failure run starts"),
+        FShipCaptureAutomationAccessor::StartCaptureAt(
+            WriteFailureCapture,
+            500.0,
+            700.0));
+    const FString WriteFailureRunDirectory =
+        FShipCaptureAutomationAccessor::RunDirectory(WriteFailureCapture);
+    TestTrue(
+        TEXT("Manifest-write failure run is tracked"),
+        Cleanup.Track(WriteFailureRunDirectory));
+    FShipCaptureAutomationAccessor::SetFailurePoint(
+        WriteFailureCapture,
+        EShipCaptureTestFailurePoint::ManifestTempWrite);
+    WriteFailureCapture.StopAndFinalize(true);
+    TestFalse(
+        TEXT("Failed manifest has no final"),
+        IFileManager::Get().FileExists(
+            *(WriteFailureRunDirectory / TEXT("manifest.json"))));
+    TestFalse(
+        TEXT("Failed manifest has no temp"),
+        IFileManager::Get().FileExists(
+            *(WriteFailureRunDirectory / TEXT(".manifest.json.tmp"))));
+    TestTrue(
+        TEXT("Manifest failure preserves prior color pair"),
+        IFileManager::Get().FileSize(
+            *(WriteFailureRunDirectory / TEXT("color_000000.png"))) > 0);
+    TestTrue(
+        TEXT("Manifest failure preserves prior depth pair"),
+        IFileManager::Get().FileSize(
+            *(WriteFailureRunDirectory / TEXT("depth_000000.png"))) > 0);
+    TestTrue(
+        TEXT("Manifest write failure latches capture failure"),
+        WriteFailureCapture.HasCaptureFailure());
+    TestEqual(
+        TEXT("Manifest write is attempted once"),
+        FShipCaptureAutomationAccessor::FinalizeAttemptCount(
+            WriteFailureCapture),
+        1);
+
+    TestTrue(TEXT("Manifest run cleanup succeeds"), Cleanup.Cleanup());
+    TestEqual(
+        TEXT("Manifest cleanup preserves pre-existing children"),
         FString::Join(Cleanup.DirectChildDirectories(), TEXT("|")),
         FString::Join(Cleanup.PreExistingChildren, TEXT("|")));
     return !HasAnyErrors();

@@ -2,6 +2,7 @@
 
 #include "Components/SceneCaptureComponent2D.h"
 #include "Components/SceneComponent.h"
+#include "Dom/JsonObject.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformTime.h"
@@ -15,7 +16,55 @@
 #include "Modules/ModuleManager.h"
 #include "ShipPawn.h"
 #include "ShipCaptureSimulation.h"
+#include "Serialization/JsonSerializer.h"
+#include "Serialization/JsonWriter.h"
 #include "UnrealClient.h"
+
+namespace
+{
+const TCHAR* CaptureFailureCategoryName(uint8 CategoryValue)
+{
+    switch (CategoryValue)
+    {
+    case 1:
+        return TEXT("invalid_configuration");
+    case 2:
+        return TEXT("rig_mismatch");
+    case 3:
+        return TEXT("target_unavailable");
+    case 4:
+        return TEXT("readback");
+    case 5:
+        return TEXT("pixel_count");
+    case 6:
+        return TEXT("depth_normalization");
+    case 7:
+        return TEXT("png_encode");
+    case 8:
+        return TEXT("directory_create");
+    case 9:
+        return TEXT("path_collision");
+    case 10:
+        return TEXT("temp_write");
+    case 11:
+        return TEXT("frame_rename");
+    case 12:
+        return TEXT("pair_cleanup");
+    case 13:
+        return TEXT("frame_record");
+    case 14:
+        return TEXT("invalid_clock");
+    case 15:
+        return TEXT("manifest_serialize");
+    case 16:
+        return TEXT("manifest_write");
+    case 17:
+        return TEXT("manifest_rename");
+    default:
+        return TEXT("none");
+    }
+}
+}
 
 UShipCapture::UShipCapture()
 {
@@ -173,23 +222,43 @@ bool UShipCapture::StartCaptureAt(
     {
         return false;
     }
+    double NewFirstCaptureSeconds = 0.0;
+    double NewLastClockSeconds = 0.0;
+    double NewAccumulatedRealSeconds = 0.0;
+    int64 NewCaptureTimeMs = 0;
     if (!FMath::IsFinite(WallSlideCm) ||
-        !FMath::IsFinite(NowSeconds) ||
+        !InitializeCaptureClock(
+            NowSeconds,
+            NewFirstCaptureSeconds,
+            NewLastClockSeconds,
+            NewAccumulatedRealSeconds,
+            NewCaptureTimeMs) ||
         !SetupCaptureRig())
     {
         return LatchCaptureFailure(
             EShipCaptureFailureCategory::InvalidConfiguration,
             NextFrameIndex);
     }
-    FirstCaptureSeconds = NowSeconds;
+    CapturedWallSlideCm = WallSlideCm;
     if (!CreateUniqueRunDirectory() ||
         !CaptureEncodeAndPublishFrame(0, 0.0, 0))
     {
         return false;
     }
 
+    FirstCaptureSeconds = NewFirstCaptureSeconds;
+    LastClockSeconds = NewLastClockSeconds;
+    AccumulatedRealSeconds = NewAccumulatedRealSeconds;
+    LastCommittedTimeMs = NewCaptureTimeMs;
     LifecycleState = EShipCaptureLifecycleState::Capturing;
     SetComponentTickEnabled(true);
+    UE_LOG(
+        LogTemp,
+        Display,
+        TEXT("Stage5CaptureStarted run=%s resolution=%d interval_ms=%d"),
+        *RunRelativePath,
+        CaptureResolution,
+        CaptureIntervalMs);
     return true;
 }
 
@@ -230,6 +299,7 @@ bool UShipCapture::CaptureEncodeAndPublishFrame(
     double CaptureSeconds,
     int64 CaptureTimeMs)
 {
+    const double TransactionStartSeconds = FPlatformTime::Seconds();
     if (FrameIndex != NextFrameIndex ||
         !FMath::IsFinite(CaptureSeconds) ||
         CaptureSeconds < 0.0 ||
@@ -374,6 +444,23 @@ bool UShipCapture::CaptureEncodeAndPublishFrame(
         return false;
     }
     NextFrameIndex = Frames.Num();
+    const double TransactionEndSeconds = FPlatformTime::Seconds();
+    const double TransactionMilliseconds =
+        FMath::Max(
+            0.0,
+            (TransactionEndSeconds - TransactionStartSeconds) * 1000.0);
+    if (FMath::IsFinite(TransactionMilliseconds))
+    {
+        TransactionDurationsMs.Add(TransactionMilliseconds);
+    }
+    UE_LOG(
+        LogTemp,
+        Display,
+        TEXT("Stage5CapturePair index=%d time_ms=%lld transaction_ms=%.3f run=%s"),
+        FrameIndex,
+        CaptureTimeMs,
+        TransactionMilliseconds,
+        *RunRelativePath);
     return true;
 }
 
@@ -383,24 +470,35 @@ void UShipCapture::TickAtTime(double NowSeconds)
     {
         return;
     }
-    const double CaptureSeconds = NowSeconds - FirstCaptureSeconds;
-    const double CaptureMilliseconds = CaptureSeconds * 1000.0;
-    if (!FMath::IsFinite(NowSeconds) ||
-        !FMath::IsFinite(CaptureSeconds) ||
-        !FMath::IsFinite(CaptureMilliseconds) ||
-        CaptureSeconds < 0.0 ||
-        CaptureMilliseconds >
-            static_cast<double>(TNumericLimits<int64>::Max()))
+    const FShipCaptureScheduleStep Schedule = AdvanceCaptureSchedule(
+        NowSeconds,
+        FirstCaptureSeconds,
+        LastClockSeconds,
+        AccumulatedRealSeconds,
+        LastCommittedTimeMs,
+        CaptureIntervalMs);
+    if (Schedule.Decision == EShipCaptureScheduleDecision::Invalid)
     {
         LatchCaptureFailure(
             EShipCaptureFailureCategory::InvalidClock,
             NextFrameIndex);
         return;
     }
-    CaptureEncodeAndPublishFrame(
-        NextFrameIndex,
-        CaptureSeconds,
-        FMath::RoundToInt64(CaptureMilliseconds));
+    LastClockSeconds = Schedule.NextLastClockSeconds;
+    AccumulatedRealSeconds = Schedule.NextAccumulatedRealSeconds;
+    if (Schedule.Decision == EShipCaptureScheduleDecision::NotDue)
+    {
+        return;
+    }
+
+    const double CaptureSeconds = NowSeconds - FirstCaptureSeconds;
+    if (CaptureEncodeAndPublishFrame(
+            NextFrameIndex,
+            CaptureSeconds,
+            Schedule.CaptureTimeMs))
+    {
+        LastCommittedTimeMs = Schedule.CaptureTimeMs;
+    }
 }
 
 bool UShipCapture::HasOpticalEquality() const
@@ -448,6 +546,20 @@ bool UShipCapture::LatchCaptureFailure(
         bCaptureFailureLatched = true;
         FirstFailureCategory = FailureCategory;
         FirstFailureFrameIndex = FrameIndex;
+#if WITH_DEV_AUTOMATION_TESTS
+        ++TestFailureLogCount;
+#endif
+        const FString SafeRelativePath = RunRelativePath.IsEmpty()
+            ? FString(TEXT("ShipCaptures"))
+            : RunRelativePath;
+        UE_LOG(
+            LogTemp,
+            Error,
+            TEXT("Stage5CaptureFailure category=%s index=%d run=%s"),
+            CaptureFailureCategoryName(
+                static_cast<uint8>(FailureCategory)),
+            FrameIndex,
+            *SafeRelativePath);
     }
     LifecycleState = EShipCaptureLifecycleState::CaptureFailed;
     SetComponentTickEnabled(false);
@@ -585,9 +697,141 @@ bool UShipCapture::CaptureAndEncodePair(
     return true;
 }
 
+bool UShipCapture::CleanupManifestPaths(
+    const FString& ManifestTempPath,
+    const FString& ManifestFinalPath)
+{
+    bool bCleanupSucceeded = true;
+    for (const FString* Path : {
+             &ManifestTempPath,
+             &ManifestFinalPath})
+    {
+        if (IFileManager::Get().FileExists(**Path) &&
+            !IFileManager::Get().Delete(**Path, true, false, true))
+        {
+            bCleanupSucceeded = false;
+        }
+    }
+    if (!bCleanupSucceeded && !bCaptureFailureLatched)
+    {
+        LatchCaptureFailure(
+            EShipCaptureFailureCategory::PairCleanup,
+            NextFrameIndex);
+    }
+    return bCleanupSucceeded;
+}
+
+bool UShipCapture::WriteManifest(bool bSimulationSucceeded)
+{
+    if (Frames.IsEmpty() || RunDirectoryPath.IsEmpty())
+    {
+        return false;
+    }
+
+    const bool bSuccessfulResult =
+        bSimulationSucceeded && !bCaptureFailureLatched;
+    const TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
+    Root->SetNumberField(TEXT("frame_count"), Frames.Num());
+    Root->SetNumberField(TEXT("interval_ms"), CaptureIntervalMs);
+    Root->SetNumberField(TEXT("depth_near_cm"), DepthNearCm);
+    Root->SetNumberField(TEXT("depth_far_cm"), DepthFarCm);
+    TArray<TSharedPtr<FJsonValue>> ResolutionValues;
+    ResolutionValues.Add(MakeShared<FJsonValueNumber>(CaptureResolution));
+    ResolutionValues.Add(MakeShared<FJsonValueNumber>(CaptureResolution));
+    Root->SetArrayField(
+        TEXT("capture_resolution"),
+        MoveTemp(ResolutionValues));
+    Root->SetNumberField(TEXT("wall_slide_cm"), CapturedWallSlideCm);
+    Root->SetStringField(
+        TEXT("result"),
+        bSuccessfulResult ? TEXT("success") : TEXT("fail"));
+
+    TArray<TSharedPtr<FJsonValue>> FrameValues;
+    FrameValues.Reserve(Frames.Num());
+    for (const FShipCaptureFrameRecord& Frame : Frames)
+    {
+        const TSharedRef<FJsonObject> FrameObject =
+            MakeShared<FJsonObject>();
+        FrameObject->SetNumberField(TEXT("index"), Frame.Index);
+        FrameObject->SetStringField(TEXT("color"), Frame.ColorLeafName);
+        FrameObject->SetStringField(TEXT("depth"), Frame.DepthLeafName);
+        FrameObject->SetNumberField(TEXT("time_ms"), Frame.TimeMs);
+        FrameValues.Add(MakeShared<FJsonValueObject>(FrameObject));
+    }
+    Root->SetArrayField(TEXT("frames"), MoveTemp(FrameValues));
+
+    FString JsonText;
+    const TSharedRef<
+        TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+        TJsonWriterFactory<
+            TCHAR,
+            TCondensedJsonPrintPolicy<TCHAR>>::Create(&JsonText);
+    if (!FJsonSerializer::Serialize(Root, Writer) || JsonText.IsEmpty())
+    {
+        return LatchCaptureFailure(
+            EShipCaptureFailureCategory::ManifestSerialize,
+            NextFrameIndex);
+    }
+
+    const FString ManifestTempPath =
+        RunDirectoryPath / TEXT(".manifest.json.tmp");
+    const FString ManifestFinalPath =
+        RunDirectoryPath / TEXT("manifest.json");
+    if (IFileManager::Get().FileExists(*ManifestTempPath) ||
+        IFileManager::Get().FileExists(*ManifestFinalPath) ||
+        IFileManager::Get().DirectoryExists(*ManifestTempPath) ||
+        IFileManager::Get().DirectoryExists(*ManifestFinalPath))
+    {
+        return LatchCaptureFailure(
+            EShipCaptureFailureCategory::PathCollision,
+            NextFrameIndex);
+    }
+
+    bool bTempWritten = false;
+#if WITH_DEV_AUTOMATION_TESTS
+    if (TestFailurePoint !=
+        EShipCaptureTestFailurePoint::ManifestTempWrite)
+#endif
+    {
+        bTempWritten = FFileHelper::SaveStringToFile(
+            JsonText,
+            *ManifestTempPath,
+            FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+    }
+    if (!bTempWritten ||
+        !IFileManager::Get().FileExists(*ManifestTempPath) ||
+        IFileManager::Get().FileSize(*ManifestTempPath) <= 0)
+    {
+        LatchCaptureFailure(
+            EShipCaptureFailureCategory::ManifestWrite,
+            NextFrameIndex);
+        CleanupManifestPaths(ManifestTempPath, ManifestFinalPath);
+        return false;
+    }
+
+    const bool bManifestRenamed = IFileManager::Get().Move(
+        *ManifestFinalPath,
+        *ManifestTempPath,
+        false,
+        false,
+        false,
+        true);
+    if (!bManifestRenamed ||
+        !IFileManager::Get().FileExists(*ManifestFinalPath) ||
+        IFileManager::Get().FileSize(*ManifestFinalPath) <= 0)
+    {
+        LatchCaptureFailure(
+            EShipCaptureFailureCategory::ManifestRename,
+            NextFrameIndex);
+        CleanupManifestPaths(ManifestTempPath, ManifestFinalPath);
+        return false;
+    }
+    return true;
+}
+
 void UShipCapture::StopAndFinalize(bool bSimulationSucceeded)
 {
-    (void)bSimulationSucceeded;
+    SetComponentTickEnabled(false);
     if (LifecycleState == EShipCaptureLifecycleState::Finalized ||
         LifecycleState == EShipCaptureLifecycleState::Finalizing ||
         LifecycleState == EShipCaptureLifecycleState::NotStarted)
@@ -596,8 +840,25 @@ void UShipCapture::StopAndFinalize(bool bSimulationSucceeded)
     }
 
     LifecycleState = EShipCaptureLifecycleState::Finalizing;
-    SetComponentTickEnabled(false);
+    ++FinalizeAttemptCount;
+    const bool bManifestPublished =
+        Frames.IsEmpty() || WriteManifest(bSimulationSucceeded);
     LifecycleState = EShipCaptureLifecycleState::Finalized;
+    UE_LOG(
+        LogTemp,
+        Display,
+        TEXT("Stage5CaptureFinalized result=%s frames=%d manifest=%s run=%s"),
+        bSimulationSucceeded && !bCaptureFailureLatched &&
+                bManifestPublished
+            ? TEXT("success")
+            : TEXT("fail"),
+        Frames.Num(),
+        bManifestPublished && !Frames.IsEmpty()
+            ? TEXT("published")
+            : TEXT("not_published"),
+        RunRelativePath.IsEmpty()
+            ? TEXT("ShipCaptures")
+            : *RunRelativePath);
 }
 
 bool UShipCapture::IsCaptureActive() const
@@ -616,6 +877,11 @@ void UShipCapture::TickComponent(
     FActorComponentTickFunction* ThisTickFunction)
 {
     Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+    if (LifecycleState == EShipCaptureLifecycleState::Capturing)
+    {
+        const double NowSeconds = FPlatformTime::Seconds();
+        TickAtTime(NowSeconds);
+    }
 }
 
 void UShipCapture::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -781,5 +1047,47 @@ int32 FShipCaptureAutomationAccessor::CommittedFrameCount(
     const UShipCapture& Capture)
 {
     return Capture.Frames.Num();
+}
+
+int32 FShipCaptureAutomationAccessor::FinalizeAttemptCount(
+    const UShipCapture& Capture)
+{
+    return Capture.FinalizeAttemptCount;
+}
+
+int32 FShipCaptureAutomationAccessor::FailureLogCount(
+    const UShipCapture& Capture)
+{
+    return Capture.TestFailureLogCount;
+}
+
+int32 FShipCaptureAutomationAccessor::CaptureResolution(
+    const UShipCapture& Capture)
+{
+    return Capture.CaptureResolution;
+}
+
+int32 FShipCaptureAutomationAccessor::CaptureIntervalMs(
+    const UShipCapture& Capture)
+{
+    return Capture.CaptureIntervalMs;
+}
+
+float FShipCaptureAutomationAccessor::CaptureFovDegrees(
+    const UShipCapture& Capture)
+{
+    return Capture.CaptureFovDegrees;
+}
+
+bool FShipCaptureAutomationAccessor::HasOpticalEquality(
+    const UShipCapture& Capture)
+{
+    return Capture.HasOpticalEquality();
+}
+
+TArray<double> FShipCaptureAutomationAccessor::TransactionDurationsMs(
+    const UShipCapture& Capture)
+{
+    return Capture.TransactionDurationsMs;
 }
 #endif
