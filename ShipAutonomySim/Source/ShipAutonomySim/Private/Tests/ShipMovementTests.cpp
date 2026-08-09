@@ -769,7 +769,9 @@ bool FShipTransformOwnershipTest::RunTest(const FString&)
         {TEXT("/Private/ShipPawn.cpp"),
          TEXT("VisualMesh->SetRelativeScale3D(FVector(2.0,1.0,1.0));"), 1},
         {TEXT("/Private/ShipPawn.cpp"),
-         TEXT("CameraBoom->SetRelativeRotation(FRotator(CameraPitchDegrees,0.0,0.0));"), 1}
+         TEXT("CameraBoom->SetRelativeRotation(FRotator(CameraPitchDegrees,0.0,0.0));"), 1},
+        {TEXT("/Private/ShipCapture.cpp"),
+         TEXT("CaptureMount->SetRelativeLocationAndRotation(CaptureRelativeLocationCm,CaptureRelativeRotation);"), 1}
     };
     struct FActorMutatorFileCount
     {
@@ -782,7 +784,8 @@ bool FShipTransformOwnershipTest::RunTest(const FString&)
         {TEXT("/Private/ShipNavigator.cpp"), 0},
         {TEXT("/Private/CourseBuilder.cpp"), 0},
         {TEXT("/Private/SimGameMode.cpp"), 0},
-        {TEXT("/Private/ShipPawn.cpp"), 0}
+        {TEXT("/Private/ShipPawn.cpp"), 0},
+        {TEXT("/Private/ShipCapture.cpp"), 0}
     };
     const TArray<FString> ActorMutators = {
         TEXT("SetActorTransform("), TEXT("SetActorLocation("),

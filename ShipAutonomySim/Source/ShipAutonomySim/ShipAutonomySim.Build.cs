@@ -21,7 +21,9 @@ public class ShipAutonomySim : ModuleRules
 				"EnhancedInput",
 				"RenderCore",
 				"RHI",
+				"ImageCore",
 				"ImageWrapper",
+				"Json",
 				"Water"
 			});
 	}

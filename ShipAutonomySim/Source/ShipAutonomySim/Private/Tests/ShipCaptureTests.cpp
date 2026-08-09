@@ -1,9 +1,11 @@
 #if WITH_DEV_AUTOMATION_TESTS
 #include <limits>
 
+#include "Engine/World.h"
 #include "Misc/AutomationTest.h"
 #include "ShipCapture.h"
 #include "ShipCaptureSimulation.h"
+#include "ShipPawn.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     FShipCaptureSchedulerTest,
@@ -19,6 +21,31 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     FShipCaptureFrameRecordsTest,
     "ShipAutonomySim.ShipCapture.Unit.FrameRecords",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipCaptureRigConfigurationTest,
+    "ShipAutonomySim.ShipCapture.Component.RigConfiguration",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+namespace
+{
+class FScopedShipCaptureTestWorld
+{
+public:
+    FScopedShipCaptureTestWorld()
+    {
+        World = UWorld::CreateWorld(EWorldType::Game, false);
+        check(World != nullptr && World->GetPhysicsScene() != nullptr);
+    }
+
+    ~FScopedShipCaptureTestWorld()
+    {
+        World->DestroyWorld(false);
+    }
+
+    UWorld* World = nullptr;
+};
+}
 
 bool FShipCaptureSchedulerTest::RunTest(const FString& Parameters)
 {
@@ -313,6 +340,51 @@ bool FShipCaptureFrameRecordsTest::RunTest(const FString& Parameters)
     TestFalse(
         TEXT("Non-finite resolved slide is rejected"),
         IsValidCaptureWallSlide(0.0, std::numeric_limits<double>::infinity()));
+
+    return true;
+}
+
+bool FShipCaptureRigConfigurationTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+
+    FScopedShipCaptureTestWorld TestWorld;
+    AShipPawn* Pawn = TestWorld.World->SpawnActor<AShipPawn>();
+    TestNotNull(TEXT("Ship pawn spawns"), Pawn);
+    if (Pawn == nullptr)
+    {
+        return false;
+    }
+
+    const FShipCaptureRigSnapshot Snapshot =
+        FShipCaptureAutomationAccessor::SetupRigOnly(*Pawn);
+    TestTrue(TEXT("Rig setup succeeds"), Snapshot.bSetupSucceeded);
+    TestEqual(TEXT("One capture mount"), Snapshot.CaptureMountCount, 1);
+    TestEqual(TEXT("One color capture"), Snapshot.ColorCaptureCount, 1);
+    TestEqual(TEXT("One depth capture"), Snapshot.DepthCaptureCount, 1);
+    TestEqual(TEXT("One ship capture"), Snapshot.ShipCaptureCount, 1);
+    TestTrue(TEXT("Both captures share the mount"), Snapshot.bSameAttachParent);
+    TestTrue(
+        TEXT("Both captures keep identity relative transforms"),
+        Snapshot.bIdentityRelativeTransforms);
+    TestTrue(
+        TEXT("Both captures have the same world transform"),
+        Snapshot.bSameWorldTransform);
+    TestTrue(TEXT("Both captures are perspective"), Snapshot.bPerspectiveProjection);
+    TestTrue(
+        TEXT("Automatic capture and persistent state are disabled"),
+        Snapshot.bAutomaticCaptureDisabled);
+    TestTrue(
+        TEXT("Color source is FinalColorLDR"),
+        Snapshot.bColorSourceFinalColorLdr);
+    TestTrue(
+        TEXT("Depth source is SceneDepth"),
+        Snapshot.bDepthSourceSceneDepth);
+    TestTrue(TEXT("Color target is BGRA8"), Snapshot.bColorTargetBgra8);
+    TestTrue(TEXT("Depth target is R32 float"), Snapshot.bDepthTargetR32Float);
+    TestTrue(TEXT("Color exposure is fixed"), Snapshot.bFixedColorExposure);
+    TestEqual(TEXT("Default resolution is 512"), Snapshot.Resolution, 512);
+    TestEqual(TEXT("Default FOV is 90 degrees"), Snapshot.FovDegrees, 90.0f);
 
     return true;
 }

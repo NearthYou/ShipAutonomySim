@@ -13,6 +13,9 @@ class UInputAction;
 class UInputMappingContext;
 class UShipMovement;
 class UShipNavigator;
+class UShipCapture;
+class USceneCaptureComponent2D;
+class USceneComponent;
 class USpringArmComponent;
 class UStaticMeshComponent;
 struct FInputActionValue;
@@ -34,6 +37,7 @@ public:
         AStaticMeshActor* ActualWall,
         ASimGameMode* RunOwner);
     UShipNavigator* GetNavigator() const;
+    UShipCapture* GetCapture() const;
 
 protected:
     virtual void BeginPlay() override;
@@ -50,6 +54,18 @@ private:
 
     UPROPERTY(VisibleAnywhere, Category=Autonomy)
     TObjectPtr<UShipNavigator> Navigator;
+
+    UPROPERTY(VisibleAnywhere, Category=Capture)
+    TObjectPtr<USceneComponent> CaptureMount;
+
+    UPROPERTY(VisibleAnywhere, Category=Capture)
+    TObjectPtr<USceneCaptureComponent2D> ColorCapture;
+
+    UPROPERTY(VisibleAnywhere, Category=Capture)
+    TObjectPtr<USceneCaptureComponent2D> DepthCapture;
+
+    UPROPERTY(VisibleAnywhere, Category=Capture)
+    TObjectPtr<UShipCapture> ShipCapture;
 
     UPROPERTY(VisibleAnywhere, Category=Camera)
     TObjectPtr<USpringArmComponent> CameraBoom;

@@ -1,6 +1,8 @@
 #include "ShipPawn.h"
 #include "Camera/CameraComponent.h"
 #include "Components/BoxComponent.h"
+#include "Components/SceneCaptureComponent2D.h"
+#include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "EnhancedActionKeyMapping.h"
 #include "EnhancedInputComponent.h"
@@ -13,6 +15,7 @@
 #include "InputCoreTypes.h"
 #include "InputMappingContext.h"
 #include "InputModifiers.h"
+#include "ShipCapture.h"
 #include "ShipMovement.h"
 #include "ShipNavigator.h"
 #include "UObject/ConstructorHelpers.h"
@@ -54,6 +57,18 @@ AShipPawn::AShipPawn()
         CreateDefaultSubobject<UShipMovement>(TEXT("ShipMovement"));
     Navigator =
         CreateDefaultSubobject<UShipNavigator>(TEXT("ShipNavigator"));
+    CaptureMount =
+        CreateDefaultSubobject<USceneComponent>(TEXT("CaptureMount"));
+    CaptureMount->SetupAttachment(CollisionRoot);
+    ColorCapture = CreateDefaultSubobject<USceneCaptureComponent2D>(
+        TEXT("ColorCapture"));
+    ColorCapture->SetupAttachment(CaptureMount);
+    DepthCapture = CreateDefaultSubobject<USceneCaptureComponent2D>(
+        TEXT("DepthCapture"));
+    DepthCapture->SetupAttachment(CaptureMount);
+    ShipCapture =
+        CreateDefaultSubobject<UShipCapture>(TEXT("ShipCapture"));
+    ShipCapture->BindCaptureRig(CaptureMount, ColorCapture, DepthCapture);
     CameraBoom =
         CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
     CameraBoom->SetupAttachment(CollisionRoot);
@@ -229,6 +244,11 @@ bool AShipPawn::EnterAutonomy(
 UShipNavigator* AShipPawn::GetNavigator() const
 {
     return Navigator.Get();
+}
+
+UShipCapture* AShipPawn::GetCapture() const
+{
+    return ShipCapture.Get();
 }
 
 void AShipPawn::HandleThrottle(const FInputActionValue& Value)
