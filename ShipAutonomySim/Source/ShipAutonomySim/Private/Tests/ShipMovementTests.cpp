@@ -1758,6 +1758,9 @@ bool FSimGameModeBootstrapTest::RunTest(const FString&)
     {
         return false;
     }
+    FString InitGameError;
+    GameMode->InitGame(
+        TEXT("MainLevel"), TEXT("?Stage5Capture=0"), InitGameError);
     FSimGameModeTestAccessor::SetSkipStage4Orchestration(*GameMode, false);
     FSimGameModeTestAccessor::SetWaterSurfaceOverride(*GameMode, 75.0);
     Input.StartPlay();
