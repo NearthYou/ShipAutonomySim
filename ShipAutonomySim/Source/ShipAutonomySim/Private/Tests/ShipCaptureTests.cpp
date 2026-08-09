@@ -15,6 +15,7 @@
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
 #include "ShipCapture.h"
+#include "ShipCaptureBundle.h"
 #include "ShipCaptureSimulation.h"
 #include "ShipMovement.h"
 #include "ShipNavigationTypes.h"
@@ -37,6 +38,11 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     FShipCaptureFrameRecordsTest,
     "ShipAutonomySim.ShipCapture.Unit.FrameRecords",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FShipCaptureBundleFormatTest,
+    "ShipAutonomySim.ShipCapture.Unit.BundleFormat",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -260,6 +266,173 @@ struct FShipCaptureGameModeTestAccessor
         return false;
     }
 };
+
+bool FShipCaptureBundleFormatTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    const TArray64<uint8> ColorBytes{
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+        0x10, 0x11, 0x12, 0x13};
+    const TArray64<uint8> DepthBytes{
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+        0x20, 0x21, 0x22};
+    const FString ManifestJson =
+        TEXT("{\"frame_count\":1,\"frames\":[]}");
+    const TArray<FShipCaptureBundleAsset> Assets{
+        {TEXT("color_000000.png"), TEXT("image/png"), ColorBytes},
+        {TEXT("depth_000000.png"), TEXT("image/png"), DepthBytes}};
+
+    TArray64<uint8> BundleBytes;
+    TestTrue(
+        TEXT("Valid compressed PNG assets build a bundle"),
+        BuildShipCaptureBundle(ManifestJson, Assets, BundleBytes));
+    TestTrue(
+        TEXT("Bundle contains fixed header and both payloads"),
+        BundleBytes.Num() >= 12 + ColorBytes.Num() + DepthBytes.Num());
+    if (BundleBytes.Num() < 12 + ColorBytes.Num() + DepthBytes.Num())
+    {
+        return false;
+    }
+
+    constexpr ANSICHAR ExpectedMagic[] = "SIVPACK1";
+    for (int32 Index = 0; Index < 8; ++Index)
+    {
+        TestEqual(
+            *FString::Printf(TEXT("Bundle magic byte %d"), Index),
+            BundleBytes[Index],
+            static_cast<uint8>(ExpectedMagic[Index]));
+    }
+    const uint32 HeaderSize =
+        static_cast<uint32>(BundleBytes[8]) |
+        (static_cast<uint32>(BundleBytes[9]) << 8) |
+        (static_cast<uint32>(BundleBytes[10]) << 16) |
+        (static_cast<uint32>(BundleBytes[11]) << 24);
+    TestTrue(TEXT("Bundle header length is positive"), HeaderSize > 0);
+    TestEqual(
+        TEXT("Bundle size matches header and payload sizes"),
+        BundleBytes.Num(),
+        static_cast<int64>(12) + HeaderSize +
+            ColorBytes.Num() + DepthBytes.Num());
+
+    const FUTF8ToTCHAR HeaderConverter(
+        reinterpret_cast<const ANSICHAR*>(BundleBytes.GetData() + 12),
+        HeaderSize);
+    const FString HeaderJson(
+        HeaderConverter.Length(),
+        HeaderConverter.Get());
+    TSharedPtr<FJsonObject> HeaderObject;
+    const TSharedRef<TJsonReader<>> HeaderReader =
+        TJsonReaderFactory<>::Create(HeaderJson);
+    TestTrue(
+        TEXT("Bundle header is valid JSON"),
+        FJsonSerializer::Deserialize(HeaderReader, HeaderObject) &&
+            HeaderObject.IsValid());
+    if (!HeaderObject.IsValid())
+    {
+        return false;
+    }
+    TestEqual(
+        TEXT("Bundle format identifier"),
+        HeaderObject->GetStringField(TEXT("format")),
+        FString(TEXT("ship-image-sequence")));
+    TestEqual(
+        TEXT("Bundle version"),
+        HeaderObject->GetIntegerField(TEXT("version")),
+        1);
+    TestEqual(
+        TEXT("Bundle preserves manifest JSON"),
+        HeaderObject->GetStringField(TEXT("manifest_json")),
+        ManifestJson);
+    const TArray<TSharedPtr<FJsonValue>>& HeaderAssets =
+        HeaderObject->GetArrayField(TEXT("assets"));
+    TestEqual(TEXT("Bundle asset count"), HeaderAssets.Num(), 2);
+    if (HeaderAssets.Num() == 2)
+    {
+        const TSharedPtr<FJsonObject> ColorHeader =
+            HeaderAssets[0]->AsObject();
+        const TSharedPtr<FJsonObject> DepthHeader =
+            HeaderAssets[1]->AsObject();
+        TestEqual(
+            TEXT("Color asset path"),
+            ColorHeader->GetStringField(TEXT("path")),
+            FString(TEXT("color_000000.png")));
+        TestEqual(
+            TEXT("Color asset media type"),
+            ColorHeader->GetStringField(TEXT("media_type")),
+            FString(TEXT("image/png")));
+        TestEqual(
+            TEXT("Color asset offset"),
+            ColorHeader->GetIntegerField(TEXT("offset")),
+            0);
+        TestEqual(
+            TEXT("Color asset length"),
+            ColorHeader->GetIntegerField(TEXT("length")),
+            static_cast<int32>(ColorBytes.Num()));
+        TestEqual(
+            TEXT("Depth asset offset follows color payload"),
+            DepthHeader->GetIntegerField(TEXT("offset")),
+            static_cast<int32>(ColorBytes.Num()));
+        TestEqual(
+            TEXT("Depth asset length"),
+            DepthHeader->GetIntegerField(TEXT("length")),
+            static_cast<int32>(DepthBytes.Num()));
+    }
+
+    const int64 PayloadStart = 12 + HeaderSize;
+    for (int64 Index = 0; Index < ColorBytes.Num(); ++Index)
+    {
+        TestEqual(
+            *FString::Printf(TEXT("Color payload byte %lld"), Index),
+            BundleBytes[PayloadStart + Index],
+            ColorBytes[Index]);
+    }
+    for (int64 Index = 0; Index < DepthBytes.Num(); ++Index)
+    {
+        TestEqual(
+            *FString::Printf(TEXT("Depth payload byte %lld"), Index),
+            BundleBytes[PayloadStart + ColorBytes.Num() + Index],
+            DepthBytes[Index]);
+    }
+
+    const auto TestRejected = [this](
+        const TCHAR* Label,
+        const FString& CandidateManifest,
+        const TArray<FShipCaptureBundleAsset>& CandidateAssets)
+    {
+        TArray64<uint8> RejectedBytes{0xff};
+        TestFalse(
+            Label,
+            BuildShipCaptureBundle(
+                CandidateManifest,
+                CandidateAssets,
+                RejectedBytes));
+        TestTrue(
+            *FString::Printf(TEXT("%s resets output"), Label),
+            RejectedBytes.IsEmpty());
+    };
+    TestRejected(TEXT("Empty manifest is rejected"), TEXT(""), Assets);
+    TestRejected(
+        TEXT("Empty asset list is rejected"),
+        ManifestJson,
+        {});
+    TestRejected(
+        TEXT("Duplicate asset path is rejected"),
+        ManifestJson,
+        {Assets[0], Assets[0]});
+    FShipCaptureBundleAsset EmptyPayload = Assets[0];
+    EmptyPayload.Bytes.Reset();
+    TestRejected(
+        TEXT("Empty asset payload is rejected"),
+        ManifestJson,
+        {EmptyPayload});
+    FShipCaptureBundleAsset InvalidPng = Assets[0];
+    InvalidPng.Bytes[0] = 0x00;
+    TestRejected(
+        TEXT("Invalid PNG signature is rejected"),
+        ManifestJson,
+        {InvalidPng});
+    return !HasAnyErrors();
+}
 
 bool FShipCaptureSchedulerTest::RunTest(const FString& Parameters)
 {
