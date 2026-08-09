@@ -12,7 +12,9 @@
 #include "HAL/PlatformTime.h"
 #include "Kismet/GameplayStatics.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
+#include "Misc/Parse.h"
 #include "Misc/Paths.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
@@ -48,10 +50,80 @@ int32 GetStage5ValidationCaseCount()
     return ExpectedSlides.Num() + GetStage5CaptureOnSlides().Num();
 }
 
+struct FStage5PerformanceCondition
+{
+    const TCHAR* Name = TEXT("A");
+    bool bCaptureEnabled = false;
+};
+
+const TArray<FStage5PerformanceCondition>&
+GetStage5PerformanceConditions()
+{
+    static const TArray<FStage5PerformanceCondition> Conditions{
+        {TEXT("A"), false},
+        {TEXT("B"), true},
+        {TEXT("B"), true},
+        {TEXT("A"), false}};
+    return Conditions;
+}
+
+const TArray<double>& GetStage5PerformanceSlides()
+{
+    static const TArray<double> Slides{0.0, 0.0, 0.0, 0.0};
+    return Slides;
+}
+
+struct FStage5Statistics
+{
+    int32 SampleCount = 0;
+    double Minimum = 0.0;
+    double Median = 0.0;
+    double P95 = 0.0;
+    double Maximum = 0.0;
+    bool bValid = false;
+};
+
+FStage5Statistics CalculateStage5Statistics(
+    const TArray<double>& Samples)
+{
+    FStage5Statistics Result;
+    Result.SampleCount = Samples.Num();
+    if (Samples.IsEmpty())
+    {
+        return Result;
+    }
+    for (const double Sample : Samples)
+    {
+        if (!FMath::IsFinite(Sample) || Sample < 0.0)
+        {
+            return Result;
+        }
+    }
+
+    TArray<double> SortedSamples = Samples;
+    SortedSamples.Sort();
+    Result.Minimum = SortedSamples[0];
+    Result.Maximum = SortedSamples.Last();
+    const int32 MiddleIndex = SortedSamples.Num() / 2;
+    Result.Median = SortedSamples.Num() % 2 == 0
+        ? (SortedSamples[MiddleIndex - 1] +
+            SortedSamples[MiddleIndex]) /
+            2.0
+        : SortedSamples[MiddleIndex];
+    const int32 P95Index = FMath::Clamp(
+        FMath::CeilToInt(0.95 * SortedSamples.Num()) - 1,
+        0,
+        SortedSamples.Num() - 1);
+    Result.P95 = SortedSamples[P95Index];
+    Result.bValid = true;
+    return Result;
+}
+
 enum class EStage5ValidationPhase : uint8
 {
     RegressionCaptureOff,
     CaptureOnAcceptance,
+    Performance,
     Finished
 };
 
@@ -63,6 +135,8 @@ const TCHAR* Stage5ValidationPhaseName(EStage5ValidationPhase Phase)
         return TEXT("capture_off");
     case EStage5ValidationPhase::CaptureOnAcceptance:
         return TEXT("capture_on");
+    case EStage5ValidationPhase::Performance:
+        return TEXT("performance");
     case EStage5ValidationPhase::Finished:
         return TEXT("finished");
     }
@@ -81,6 +155,9 @@ struct FStage5CaseResult
     int32 FrameCount = 0;
     int64 LastFrameTimeMs = 0;
     FString RunDirectory;
+    TArray<double> FrameTimesMs;
+    TArray<double> TransactionDurationsMs;
+    TArray<double> CaptureIntervalsMs;
 };
 
 class FStage5CaptureRunTracker
@@ -239,11 +316,18 @@ UWorld* FindFreshMainLevelWorld(
 class FRunShipNavigationSweepCommand final : public IAutomationLatentCommand
 {
 public:
-    explicit FRunShipNavigationSweepCommand(FAutomationTestBase* InTest)
+    FRunShipNavigationSweepCommand(
+        FAutomationTestBase* InTest,
+        bool bInPerformanceMode)
         : Test(InTest)
         , OverallDeadlineSeconds(FPlatformTime::Seconds() + 720.0)
         , WorldLoadDeadlineSeconds(FPlatformTime::Seconds() + 15.0)
     {
+        bPerformanceMode = bInPerformanceMode;
+        if (bPerformanceMode)
+        {
+            ValidationPhase = EStage5ValidationPhase::Performance;
+        }
     }
 
     virtual bool Update() override
@@ -278,6 +362,10 @@ private:
 
     const TArray<double>& CurrentSlides() const
     {
+        if (bPerformanceMode)
+        {
+            return GetStage5PerformanceSlides();
+        }
         return ValidationPhase ==
                 EStage5ValidationPhase::RegressionCaptureOff
             ? ExpectedSlides
@@ -291,6 +379,11 @@ private:
 
     bool IsCaptureOnPhase() const
     {
+        if (bPerformanceMode)
+        {
+            return GetStage5PerformanceConditions()[CurrentCaseIndex]
+                .bCaptureEnabled;
+        }
         return ValidationPhase ==
             EStage5ValidationPhase::CaptureOnAcceptance;
     }
@@ -326,6 +419,29 @@ private:
         if (!IsCaptureOnPhase())
         {
             bool bValid = true;
+            if (bPerformanceMode)
+            {
+                bValid = CheckAcceptance(
+                    FShipCaptureAutomationAccessor::CaptureResolution(
+                        *Capture) == 512,
+                    FString::Printf(
+                        TEXT("Stage5PerformanceResolution case=%d"),
+                        CurrentCaseIndex)) && bValid;
+                bValid = CheckAcceptance(
+                    FShipCaptureAutomationAccessor::CaptureIntervalMs(
+                        *Capture) == 100,
+                    FString::Printf(
+                        TEXT("Stage5PerformanceInterval case=%d"),
+                        CurrentCaseIndex)) && bValid;
+                bValid = CheckAcceptance(
+                    FMath::IsNearlyEqual(
+                        FShipCaptureAutomationAccessor
+                            ::CaptureFovDegrees(*Capture),
+                        90.0f),
+                    FString::Printf(
+                        TEXT("Stage5PerformanceFov case=%d"),
+                        CurrentCaseIndex)) && bValid;
+            }
             bValid = CheckAcceptance(
                 RunDirectory.IsEmpty(),
                 FString::Printf(
@@ -488,8 +604,39 @@ private:
 
         CurrentWorld = World;
         CaseDeadlineSeconds = NowSeconds + 60.0;
+        if (bPerformanceMode)
+        {
+            PerformanceWarmupEndSeconds = NowSeconds + 1.0;
+            LastPerformanceUpdateSeconds = -1.0;
+        }
         State = EState::ObservingCase;
         return false;
+    }
+
+    void RecordPerformanceFrameTime(double NowSeconds)
+    {
+        if (!bPerformanceMode ||
+            NowSeconds < PerformanceWarmupEndSeconds)
+        {
+            return;
+        }
+        if (LastPerformanceUpdateSeconds >= 0.0)
+        {
+            const double FrameTimeMs =
+                (NowSeconds - LastPerformanceUpdateSeconds) * 1000.0;
+            if (!FMath::IsFinite(FrameTimeMs) || FrameTimeMs <= 0.0)
+            {
+                RecordFailure(FString::Printf(
+                    TEXT("Stage5PerformanceFrameTimeInvalid case=%d value=%.6f"),
+                    CurrentCaseIndex,
+                    FrameTimeMs));
+            }
+            else
+            {
+                CurrentResult.FrameTimesMs.Add(FrameTimeMs);
+            }
+        }
+        LastPerformanceUpdateSeconds = NowSeconds;
     }
 
     bool ValidateCapturePng(
@@ -771,6 +918,11 @@ private:
                     ExpectedIndex,
                     PreviousTimeMs,
                     TimeMs)) && bValid;
+            if (ExpectedIndex > 0)
+            {
+                Result.CaptureIntervalsMs.Add(
+                    static_cast<double>(TimeMs - PreviousTimeMs));
+            }
             PreviousTimeMs = TimeMs;
 
             const FString ColorPath =
@@ -787,6 +939,42 @@ private:
                 ExpectedIndex) && bValid;
             ExpectedFiles.Add(ExpectedColorLeafName);
             ExpectedFiles.Add(ExpectedDepthLeafName);
+        }
+
+        if (bPerformanceMode)
+        {
+            int32 DuplicateCount = 0;
+            int32 CatchUpCount = 0;
+            for (const double FrameIntervalMs :
+                 Result.CaptureIntervalsMs)
+            {
+                DuplicateCount += FrameIntervalMs <= 0.0 ? 1 : 0;
+                CatchUpCount +=
+                    FrameIntervalMs > 0.0 && FrameIntervalMs < 100.0
+                        ? 1
+                        : 0;
+            }
+            bValid = CheckAcceptance(
+                Result.CaptureIntervalsMs.Num() ==
+                    FMath::Max(0, FrameCount - 1) &&
+                    !Result.CaptureIntervalsMs.IsEmpty(),
+                FString::Printf(
+                    TEXT("Stage5PerformanceIntervalDataMissing case=%d frames=%d intervals=%d"),
+                    CurrentCaseIndex,
+                    FrameCount,
+                    Result.CaptureIntervalsMs.Num())) && bValid;
+            bValid = CheckAcceptance(
+                DuplicateCount == 0,
+                FString::Printf(
+                    TEXT("Stage5PerformanceDuplicateTimestamp case=%d count=%d"),
+                    CurrentCaseIndex,
+                    DuplicateCount)) && bValid;
+            bValid = CheckAcceptance(
+                CatchUpCount == 0,
+                FString::Printf(
+                    TEXT("Stage5PerformanceCatchUp case=%d count=%d"),
+                    CurrentCaseIndex,
+                    CatchUpCount)) && bValid;
         }
 
         TArray<FString> ActualFiles;
@@ -824,6 +1012,7 @@ private:
 
     bool UpdateObservingCase(double NowSeconds)
     {
+        RecordPerformanceFrameTime(NowSeconds);
         UWorld* World = CurrentWorld.Get();
         ASimGameMode* GameMode = IsValid(World)
             ? World->GetAuthGameMode<ASimGameMode>()
@@ -956,6 +1145,21 @@ private:
         {
             ++TimeoutCount;
         }
+        if (bPerformanceMode && IsValid(Capture))
+        {
+            CurrentResult.TransactionDurationsMs =
+                FShipCaptureAutomationAccessor::TransactionDurationsMs(
+                    *Capture);
+            if (!IsCaptureOnPhase() &&
+                !CurrentResult.TransactionDurationsMs.IsEmpty())
+            {
+                RecordFailure(FString::Printf(
+                    TEXT("Stage5PerformanceCaptureOffTransaction case=%d count=%d"),
+                    CurrentCaseIndex,
+                    CurrentResult.TransactionDurationsMs.Num()));
+                CurrentResult.bSuccess = false;
+            }
+        }
         Results.Add(CurrentResult);
         if (IsCaptureOnPhase())
         {
@@ -1073,6 +1277,349 @@ private:
         Test->AddError(Reason);
     }
 
+    void FinalizePerformance()
+    {
+        const TArray<FStage5PerformanceCondition>& Conditions =
+            GetStage5PerformanceConditions();
+        TArray<double> ConditionAFrameTimes;
+        TArray<double> ConditionBFrameTimes;
+        TArray<double> AggregateBIntervals;
+
+        const int32 ComparableCount =
+            FMath::Min(Results.Num(), Conditions.Num());
+        for (int32 Index = 0; Index < ComparableCount; ++Index)
+        {
+            FStage5CaseResult& Result = Results[Index];
+            const FStage5PerformanceCondition& Condition =
+                Conditions[Index];
+            bool bResultValid = Result.bSuccess;
+            bResultValid = CheckAcceptance(
+                Result.Phase == EStage5ValidationPhase::Performance,
+                FString::Printf(
+                    TEXT("Stage5PerformancePhase order=%d"),
+                    Index + 1)) && bResultValid;
+            bResultValid = CheckAcceptance(
+                FMath::IsNearlyZero(Result.SlideCm, 1e-9),
+                FString::Printf(
+                    TEXT("Stage5PerformanceSlide order=%d value=%.6f"),
+                    Index + 1,
+                    Result.SlideCm)) && bResultValid;
+            bResultValid = CheckAcceptance(
+                FMath::IsFinite(Result.MinimumWallDistanceCm) &&
+                    Result.MinimumWallDistanceCm > 0.0 &&
+                    Result.MinimumWallDistanceCm <
+                        TNumericLimits<double>::Max(),
+                FString::Printf(
+                    TEXT("Stage5PerformanceWallGap order=%d value=%.6f"),
+                    Index + 1,
+                    Result.MinimumWallDistanceCm)) && bResultValid;
+
+            const FStage5Statistics FrameStatistics =
+                CalculateStage5Statistics(Result.FrameTimesMs);
+            const bool bFrameSamplesValid =
+                FrameStatistics.bValid &&
+                !Result.FrameTimesMs.ContainsByPredicate(
+                    [](double Sample)
+                    {
+                        return !FMath::IsFinite(Sample) || Sample <= 0.0;
+                    });
+            bResultValid = CheckAcceptance(
+                bFrameSamplesValid,
+                FString::Printf(
+                    TEXT("Stage5PerformanceFrameSamples order=%d count=%d"),
+                    Index + 1,
+                    Result.FrameTimesMs.Num())) && bResultValid;
+
+            if (Condition.bCaptureEnabled)
+            {
+                const FStage5Statistics TransactionStatistics =
+                    CalculateStage5Statistics(
+                        Result.TransactionDurationsMs);
+                const FStage5Statistics IntervalStatistics =
+                    CalculateStage5Statistics(
+                        Result.CaptureIntervalsMs);
+                bResultValid = CheckAcceptance(
+                    TransactionStatistics.bValid &&
+                        Result.TransactionDurationsMs.Num() ==
+                            Result.FrameCount,
+                    FString::Printf(
+                        TEXT("Stage5PerformanceTransactionData order=%d frames=%d transactions=%d"),
+                        Index + 1,
+                        Result.FrameCount,
+                        Result.TransactionDurationsMs.Num())) &&
+                    bResultValid;
+                bResultValid = CheckAcceptance(
+                    IntervalStatistics.bValid &&
+                        Result.CaptureIntervalsMs.Num() ==
+                            Result.FrameCount - 1,
+                    FString::Printf(
+                        TEXT("Stage5PerformanceIntervalData order=%d frames=%d intervals=%d"),
+                        Index + 1,
+                        Result.FrameCount,
+                        Result.CaptureIntervalsMs.Num())) && bResultValid;
+                ConditionBFrameTimes.Append(Result.FrameTimesMs);
+                AggregateBIntervals.Append(Result.CaptureIntervalsMs);
+            }
+            else
+            {
+                bResultValid = CheckAcceptance(
+                    Result.FrameCount == 0 &&
+                        Result.TransactionDurationsMs.IsEmpty() &&
+                        Result.CaptureIntervalsMs.IsEmpty() &&
+                        Result.RunDirectory.IsEmpty(),
+                    FString::Printf(
+                        TEXT("Stage5PerformanceCaptureOffWrite order=%d frames=%d transactions=%d intervals=%d"),
+                        Index + 1,
+                        Result.FrameCount,
+                        Result.TransactionDurationsMs.Num(),
+                        Result.CaptureIntervalsMs.Num())) && bResultValid;
+                ConditionAFrameTimes.Append(Result.FrameTimesMs);
+            }
+            Result.bSuccess = bResultValid;
+        }
+
+        const FStage5Statistics ConditionAStatistics =
+            CalculateStage5Statistics(ConditionAFrameTimes);
+        const FStage5Statistics ConditionBStatistics =
+            CalculateStage5Statistics(ConditionBFrameTimes);
+        const FStage5Statistics AggregateBIntervalStatistics =
+            CalculateStage5Statistics(AggregateBIntervals);
+        TArray<double> AggregateBDeviations;
+        for (const double IntervalMs : AggregateBIntervals)
+        {
+            AggregateBDeviations.Add(FMath::Abs(IntervalMs - 100.0));
+        }
+        const FStage5Statistics AggregateBDeviationStatistics =
+            CalculateStage5Statistics(AggregateBDeviations);
+        CheckAcceptance(
+            ConditionAStatistics.bValid,
+            TEXT("Stage5PerformanceAggregateAEmpty"));
+        CheckAcceptance(
+            ConditionBStatistics.bValid,
+            TEXT("Stage5PerformanceAggregateBEmpty"));
+        CheckAcceptance(
+            AggregateBIntervalStatistics.bValid &&
+                AggregateBDeviationStatistics.bValid,
+            TEXT("Stage5PerformanceAggregateIntervalEmpty"));
+
+        int32 SuccessCount = 0;
+        int32 ConditionACount = 0;
+        int32 ConditionBCount = 0;
+        for (int32 Index = 0; Index < Results.Num(); ++Index)
+        {
+            SuccessCount += Results[Index].bSuccess ? 1 : 0;
+            if (Index < Conditions.Num() &&
+                Conditions[Index].bCaptureEnabled)
+            {
+                ++ConditionBCount;
+            }
+            else
+            {
+                ++ConditionACount;
+            }
+        }
+
+        const TArray<FString> FinalCaptureChildren =
+            CaptureRunTracker.DirectChildDirectories();
+        Test->TestEqual(
+            TEXT("performance run count"),
+            Results.Num(),
+            Conditions.Num());
+        Test->TestEqual(
+            TEXT("performance success count"),
+            SuccessCount,
+            4);
+        Test->TestEqual(TEXT("condition A count"), ConditionACount, 2);
+        Test->TestEqual(TEXT("condition B count"), ConditionBCount, 2);
+        Test->TestEqual(TEXT("collision count"), CollisionCount, 0);
+        Test->TestEqual(TEXT("timeout count"), TimeoutCount, 0);
+        Test->TestEqual(TEXT("setup failure count"), SetupFailureCount, 0);
+        Test->TestEqual(
+            TEXT("runtime calculation error count"),
+            RuntimeCalculationErrorCount,
+            0);
+        Test->TestEqual(
+            TEXT("other blocking collision count"),
+            OtherBlockingCollisionCount,
+            0);
+        Test->TestEqual(
+            TEXT("capture failure count"),
+            CaptureFailureCount,
+            0);
+        Test->TestEqual(
+            TEXT("performance fresh world identity count"),
+            ObservedWorldIdentities.Num(),
+            Conditions.Num());
+        Test->TestTrue(
+            TEXT("performance capture runs are cleaned"),
+            CaptureRunTracker.AllTrackedRunsCleaned());
+        Test->TestEqual(
+            TEXT("performance preserves pre-existing capture children"),
+            FString::Join(FinalCaptureChildren, TEXT("|")),
+            FString::Join(
+                CaptureRunTracker.PreExistingChildren,
+                TEXT("|")));
+
+        for (int32 Index = 0; Index < ComparableCount; ++Index)
+        {
+            const FStage5CaseResult& Result = Results[Index];
+            const FStage5Statistics Statistics =
+                CalculateStage5Statistics(Result.FrameTimesMs);
+            UE_LOG(
+                LogTemp,
+                Display,
+                TEXT("Stage5PerformanceRun order=%d condition=%s outcome=%s slide=%.0f world=%d sample_count=%d frame_min_ms=%.3f frame_median_ms=%.3f frame_p95_ms=%.3f frame_max_ms=%.3f elapsed_s=%.3f min_wall_gap_cm=%.3f frames=%d"),
+                Index + 1,
+                Conditions[Index].Name,
+                Result.bSuccess ? TEXT("success") : TEXT("failure"),
+                Result.SlideCm,
+                Result.WorldId,
+                Statistics.SampleCount,
+                Statistics.Minimum,
+                Statistics.Median,
+                Statistics.P95,
+                Statistics.Maximum,
+                Result.ElapsedSeconds,
+                Result.MinimumWallDistanceCm,
+                Result.FrameCount);
+        }
+        for (const TPair<const TCHAR*, const FStage5Statistics*> Aggregate : {
+                 TPair<const TCHAR*, const FStage5Statistics*>(
+                     TEXT("A"),
+                     &ConditionAStatistics),
+                 TPair<const TCHAR*, const FStage5Statistics*>(
+                     TEXT("B"),
+                     &ConditionBStatistics)})
+        {
+            UE_LOG(
+                LogTemp,
+                Display,
+                TEXT("Stage5PerformanceAggregate condition=%s sample_count=%d frame_min_ms=%.3f frame_median_ms=%.3f frame_p95_ms=%.3f frame_max_ms=%.3f"),
+                Aggregate.Key,
+                Aggregate.Value->SampleCount,
+                Aggregate.Value->Minimum,
+                Aggregate.Value->Median,
+                Aggregate.Value->P95,
+                Aggregate.Value->Maximum);
+        }
+
+        int32 AggregateMissedSlotCount = 0;
+        int32 AggregateDuplicateCount = 0;
+        int32 AggregateCatchUpCount = 0;
+        for (const double IntervalMs : AggregateBIntervals)
+        {
+            AggregateMissedSlotCount += IntervalMs >= 200.0 ? 1 : 0;
+            AggregateDuplicateCount += IntervalMs <= 0.0 ? 1 : 0;
+            AggregateCatchUpCount +=
+                IntervalMs > 0.0 && IntervalMs < 100.0 ? 1 : 0;
+        }
+        for (int32 Index = 0; Index < ComparableCount; ++Index)
+        {
+            if (!Conditions[Index].bCaptureEnabled)
+            {
+                continue;
+            }
+            const FStage5CaseResult& Result = Results[Index];
+            const FStage5Statistics TransactionStatistics =
+                CalculateStage5Statistics(
+                    Result.TransactionDurationsMs);
+            UE_LOG(
+                LogTemp,
+                Display,
+                TEXT("Stage5PerformanceTransaction order=%d condition=B count=%d min_ms=%.3f median_ms=%.3f p95_ms=%.3f max_ms=%.3f"),
+                Index + 1,
+                TransactionStatistics.SampleCount,
+                TransactionStatistics.Minimum,
+                TransactionStatistics.Median,
+                TransactionStatistics.P95,
+                TransactionStatistics.Maximum);
+
+            const FStage5Statistics IntervalStatistics =
+                CalculateStage5Statistics(Result.CaptureIntervalsMs);
+            TArray<double> Deviations;
+            int32 MissedSlotCount = 0;
+            int32 DuplicateCount = 0;
+            int32 CatchUpCount = 0;
+            for (const double IntervalMs : Result.CaptureIntervalsMs)
+            {
+                Deviations.Add(FMath::Abs(IntervalMs - 100.0));
+                MissedSlotCount += IntervalMs >= 200.0 ? 1 : 0;
+                DuplicateCount += IntervalMs <= 0.0 ? 1 : 0;
+                CatchUpCount += IntervalMs > 0.0 && IntervalMs < 100.0
+                    ? 1
+                    : 0;
+            }
+            const FStage5Statistics DeviationStatistics =
+                CalculateStage5Statistics(Deviations);
+            UE_LOG(
+                LogTemp,
+                Display,
+                TEXT("Stage5PerformanceInterval order=%d condition=B pair_count=%d target_ms=100 interval_min_ms=%.3f interval_median_ms=%.3f interval_p95_ms=%.3f interval_max_ms=%.3f deviation_min_ms=%.3f deviation_median_ms=%.3f deviation_p95_ms=%.3f deviation_max_ms=%.3f missed_ge_200=%d duplicate=%d catch_up_under_100=%d aggregate_pair_count=%d aggregate_interval_min_ms=%.3f aggregate_interval_median_ms=%.3f aggregate_interval_p95_ms=%.3f aggregate_interval_max_ms=%.3f aggregate_deviation_min_ms=%.3f aggregate_deviation_median_ms=%.3f aggregate_deviation_p95_ms=%.3f aggregate_deviation_max_ms=%.3f aggregate_missed_ge_200=%d aggregate_duplicate=%d aggregate_catch_up_under_100=%d"),
+                Index + 1,
+                IntervalStatistics.SampleCount,
+                IntervalStatistics.Minimum,
+                IntervalStatistics.Median,
+                IntervalStatistics.P95,
+                IntervalStatistics.Maximum,
+                DeviationStatistics.Minimum,
+                DeviationStatistics.Median,
+                DeviationStatistics.P95,
+                DeviationStatistics.Maximum,
+                MissedSlotCount,
+                DuplicateCount,
+                CatchUpCount,
+                AggregateBIntervalStatistics.SampleCount,
+                AggregateBIntervalStatistics.Minimum,
+                AggregateBIntervalStatistics.Median,
+                AggregateBIntervalStatistics.P95,
+                AggregateBIntervalStatistics.Maximum,
+                AggregateBDeviationStatistics.Minimum,
+                AggregateBDeviationStatistics.Median,
+                AggregateBDeviationStatistics.P95,
+                AggregateBDeviationStatistics.Maximum,
+                AggregateMissedSlotCount,
+                AggregateDuplicateCount,
+                AggregateCatchUpCount);
+        }
+
+        for (const TPair<FString, int32>& Failure : FailureCounts)
+        {
+            UE_LOG(
+                LogTemp,
+                Error,
+                TEXT("Stage5PerformanceFailure reason=%s count=%d"),
+                *Failure.Key,
+                Failure.Value);
+        }
+        const bool bSummarySucceeded =
+            Results.Num() == Conditions.Num() &&
+            SuccessCount == Conditions.Num() &&
+            ConditionACount == 2 &&
+            ConditionBCount == 2 &&
+            CollisionCount == 0 &&
+            TimeoutCount == 0 &&
+            SetupFailureCount == 0 &&
+            RuntimeCalculationErrorCount == 0 &&
+            OtherBlockingCollisionCount == 0 &&
+            CaptureFailureCount == 0 &&
+            FailureCounts.IsEmpty() &&
+            ConditionAStatistics.bValid &&
+            ConditionBStatistics.bValid &&
+            AggregateBIntervalStatistics.bValid &&
+            AggregateBDeviationStatistics.bValid &&
+            CaptureRunTracker.AllTrackedRunsCleaned() &&
+            FinalCaptureChildren ==
+                CaptureRunTracker.PreExistingChildren;
+        UE_LOG(
+            LogTemp,
+            Display,
+            TEXT("Stage5PerformanceSummary runs=%d success=%d failure=%d error=%d unknown=0 ensure=0"),
+            Results.Num(),
+            SuccessCount,
+            FMath::Max(0, Conditions.Num() - SuccessCount),
+            bSummarySucceeded ? 0 : 1);
+    }
+
     void Finalize()
     {
         if (State == EState::Finished)
@@ -1080,6 +1627,12 @@ private:
             return;
         }
         State = EState::Finished;
+
+        if (bPerformanceMode)
+        {
+            FinalizePerformance();
+            return;
+        }
 
         int32 SuccessCount = 0;
         int32 CaptureOffCount = 0;
@@ -1230,6 +1783,7 @@ private:
 
     FAutomationTestBase* Test = nullptr;
     EState State = EState::WaitingForWorld;
+    bool bPerformanceMode = false;
     EStage5ValidationPhase ValidationPhase =
         EStage5ValidationPhase::RegressionCaptureOff;
     int32 CurrentCaseIndex = 0;
@@ -1239,6 +1793,8 @@ private:
     double OverallDeadlineSeconds = 0.0;
     double WorldLoadDeadlineSeconds = 0.0;
     double CaseDeadlineSeconds = 0.0;
+    double PerformanceWarmupEndSeconds = 0.0;
+    double LastPerformanceUpdateSeconds = -1.0;
     FStage5CaseResult CurrentResult;
     TArray<FStage5CaseResult> Results;
     TMap<FString, int32> FailureCounts;
@@ -1267,7 +1823,20 @@ bool FShipNavigationActualWorldSweepTest::RunTest(const FString&)
         TEXT("Stage 5 validation has three capture-on slides"),
         GetStage5CaptureOnSlides().Num(),
         3);
-    ADD_LATENT_AUTOMATION_COMMAND(FRunShipNavigationSweepCommand(this));
+    TestEqual(
+        TEXT("Stage 5 performance has A-B-B-A runs"),
+        GetStage5PerformanceConditions().Num(),
+        4);
+    const FStage5Statistics Statistics =
+        CalculateStage5Statistics({4.0, 1.0, 3.0, 2.0});
+    TestEqual(TEXT("Statistics sample count"), Statistics.SampleCount, 4);
+    TestEqual(TEXT("Statistics even median"), Statistics.Median, 2.5);
+    TestEqual(TEXT("Statistics nearest-rank p95"), Statistics.P95, 4.0);
+    const bool bPerformanceMode = FParse::Param(
+        FCommandLine::Get(),
+        TEXT("Stage5Performance"));
+    ADD_LATENT_AUTOMATION_COMMAND(
+        FRunShipNavigationSweepCommand(this, bPerformanceMode));
     return true;
 }
 
